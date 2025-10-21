@@ -11,6 +11,7 @@ We aim to quantify how **skills can substitute each other depending on the occup
 ---
 
 ## Repository Structure
+```
 contextual_skills_substitutes/
 │
 ├── exposure_gain/                  # External validation using Google Trends data
@@ -40,3 +41,4 @@ contextual_skills_substitutes/
 │
 ├── requirements.txt                # Python dependencies
 └── README.md                       # Project documentation
+```
