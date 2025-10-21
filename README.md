@@ -4,8 +4,6 @@ _A research codebase for extracting contextual skill substitution patterns from 
 ---
 
 ## Overview
-This repository contains the official code for the paper **“Extracting Contextual Substitutes for Workplace Skills with Masked Language Models.”**
-
 We aim to quantify how **skills can substitute each other depending on the occupational and temporal context**, by fine-tuning a BERT-based model on millions of U.S. job postings (2010–2025) and analyzing contextual skill predictions, co-occurrence networks, and real-world trends.
 
 ---
