@@ -29,15 +29,18 @@ Plus:
   - preprocess_global_log.txt
   - skill2idx.json  (vocab of all IT skills that actually appeared)
 
-Notes
------
-- Set DO_RESAMPLE_TRAIN_TEST=True to re-sample train/test from scratch.
-- FINDINGS are sampled from (all files - used_files - train - test).
+Debug mode
+----------
+- --debug 사용 시:
+    * --debug_file 로 지정한 CSV(.gz) 파일 하나만 사용 (필수)
+    * 그 파일에서 원본 row를 최대 --debug_n 개 샘플링 (기본 10)
+    * 이 row들에 대한 전처리 결과 전체를
+      OUTPUT_ROOT/debug_sample.csv.gz 에 저장
 """
 
-import os, re, json, glob, random
+import os, re, json, glob, random, argparse
 from pathlib import Path
-from typing import Dict, Tuple, List, Set
+from typing import Dict, Tuple, List, Set, Optional
 
 import numpy as np
 import pandas as pd
@@ -46,7 +49,7 @@ from transformers import BertTokenizer
 
 # ─── Config ─────────────────────────────
 INPUT_ROOT     = "/home/jovyan/LEM_data/us/csv/fortnightly/all/20250607"   # year/month root
-OUTPUT_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/"
+OUTPUT_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/"
 GLOBAL_LOG     = os.path.join(OUTPUT_ROOT, "preprocess_global_log.txt")
 VOCAB_OUTPUT   = os.path.join(OUTPUT_ROOT, "skill2idx.json")
 
@@ -59,7 +62,7 @@ FINDINGS_FRAC     = 0.30   # 30% of (unused - train - test - used) per month →
 RANDOM_SEED       = 42
 
 # If True, re-sample train/test (ignore existing sampled_files_train/test.csv)
-DO_RESAMPLE_TRAIN_TEST = False
+DO_RESAMPLE_TRAIN_TEST = True
 
 MODEL_NAME = "bert-base-uncased"
 MAX_TOKENS = 512
@@ -69,7 +72,7 @@ os.makedirs(OUTPUT_ROOT, exist_ok=True)
 for d in ["train", "test", "findings"]:
     os.makedirs(os.path.join(OUTPUT_ROOT, d), exist_ok=True)
 
-tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
+tokenizer = None  # main()에서 로드
 all_skills_set: Set[str] = set()
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -127,8 +130,19 @@ def iter_month_files(root: str):
                 if fp.endswith(".csv") or fp.endswith(".csv.gz"):
                     yield (year, yyyy_mm, fp)
 
+# ─── tokenizer loader ───────────────────
+def load_tokenizer(model_name_or_path: str) -> BertTokenizer:
+    tok = BertTokenizer.from_pretrained(model_name_or_path)
+    print(f"✅ Loaded tokenizer from: {model_name_or_path}")
+    return tok
+
 # ─── token budget helpers ───────────────
 def add_tokens_side(context_list, sentences, budget, reverse=False):
+    """
+    sentences의 단어들을 토큰 예산(budget) 안에서 왼쪽/오른쪽 컨텍스트로 채워 넣는다.
+    같은 sentences에 대해 이 함수를 여러 번 호출하면 중복이 생길 수 있으므로
+    각 side마다 한 번만 호출해서 사용한다.
+    """
     if reverse:
         sentences = list(reversed(sentences))
     used = 0
@@ -148,7 +162,102 @@ def add_tokens_side(context_list, sentences, budget, reverse=False):
             used += len(word_tokens)
     return context_list, used
 
-# ─── core preprocessing (ALL matched skills per sentence) ──────────
+# ─── 공통 전처리 로직: DataFrame subset ─────
+def preprocess_rows(df_subset: pd.DataFrame, file_path: str) -> List[dict]:
+    """
+    df_subset (한 파일의 일부 row 또는 전체)에 대해서만 전처리 수행.
+    """
+    results: List[dict] = []
+
+    for orig_idx, row in tqdm(
+        df_subset.iterrows(), total=len(df_subset),
+        desc=f"Processing {os.path.basename(file_path)} subset", leave=False
+    ):
+        # IT-skill filtering with consistent normalization
+        raw_tokens   = [s.strip() for s in str(row["skills_name"]).split("|") if s.strip()]
+        skills_norm  = [normalize_plang(s) for s in raw_tokens]
+        skills_lower = [s.lower() for s in skills_norm]
+        skills_it    = [s for s in skills_lower if s in IT_SKILL_SET]
+        if not skills_it:
+            continue
+
+        body = str(row["body"]).replace("\n", " ")
+        all_skills_set.update(skills_it)
+
+        # Use text after "job description:"
+        desc_start = body.lower().find("job description:")
+        if desc_start == -1:
+            continue
+        desc_text = body[desc_start + len("job description:"):].strip()
+
+        # sentence split (simple '.' split)
+        sentences = [s.strip() for s in desc_text.split(".") if s.strip()]
+        if not sentences:
+            continue
+
+        for i, sentence in enumerate(sentences):
+            sentence = sentence.replace("\n", " ")
+
+            # collect ALL matched IT skills in this sentence
+            matched_skills: List[str] = []
+            for skill_lower in skills_it:
+                boundary_pat = re.compile(
+                    r'(?<!\w)' + re.escape(skill_lower) + r'(?!\w)',
+                    flags=re.IGNORECASE
+                )
+                if boundary_pat.search(sentence):
+                    matched_skills.append(skill_lower)
+
+            if not matched_skills:
+                continue
+
+            # create one row PER matched skill
+            for matched_skill in matched_skills:
+                pattern = re.compile(
+                    r'(?<!\w)' + re.escape(matched_skill) + r'(?!\w)',
+                    flags=re.IGNORECASE
+                )
+                masked_sentence = pattern.sub('[MASK]', sentence, count=1)
+
+                # check token budget for center
+                center_tokens = tokenizer.tokenize(masked_sentence)
+                if len(center_tokens) >= MAX_TOKENS - 2:
+                    continue
+
+                # add left/right context around the center under MAX_TOKENS
+                left_sentences  = sentences[:i]
+                right_sentences = sentences[i+1:]
+
+                budget = MAX_TOKENS - len(center_tokens) - 2
+                if budget <= 0:
+                    full_text = masked_sentence
+                else:
+                    left_budget  = budget // 2
+                    right_budget = budget - left_budget
+
+                    left_context,  _ = add_tokens_side([], left_sentences,  left_budget,  reverse=True)
+                    right_context, _ = add_tokens_side([], right_sentences, right_budget, reverse=False)
+
+                    full_text = " ".join(left_context + [masked_sentence] + right_context)
+
+                if "[MASK]" not in full_text:
+                    continue
+
+                results.append({
+                    "row_idx": int(orig_idx),
+                    "true_skill": matched_skill,
+                    "masked_sentence": full_text,
+                    "lot_v7_career_area_name": row.get("lot_v7_career_area_name", np.nan),
+                    "salary": row.get("salary", np.nan),
+                    "onet_name": row.get("onet_name", np.nan),
+                    "lot_v7_occupation_name": row.get("lot_v7_occupation_name", np.nan),
+                    "lot_v7_specialized_occupation_name": row.get("lot_v7_specialized_occupation_name", np.nan),
+                    "file_path": file_path,
+                })
+
+    return results
+
+# ─── 전체 파일 전처리 (train/test/findings용) ─────
 def preprocess_file(file_path: str) -> List[dict]:
     want_cols = [
         "skills_name",
@@ -177,93 +286,11 @@ def preprocess_file(file_path: str) -> List[dict]:
                 df[c] = np.nan
         df = df[want_cols]
 
-    # keep only rows with skills & body
     df = df.dropna(subset=["skills_name", "body"])
+    if df.empty:
+        return []
 
-    results: List[dict] = []
-
-    for orig_idx, row in tqdm(
-        df.iterrows(), total=len(df),
-        desc=f"Processing {os.path.basename(file_path)}", leave=False
-    ):
-        # IT-skill filtering with consistent normalization
-        raw_tokens   = [s.strip() for s in str(row["skills_name"]).split("|") if s.strip()]
-        skills_norm  = [normalize_plang(s) for s in raw_tokens]
-        skills_lower = [s.lower() for s in skills_norm]
-        skills_it    = [s for s in skills_lower if s in IT_SKILL_SET]
-        if not skills_it:
-            continue
-
-        body = str(row["body"]).replace("\n", " ")
-        all_skills_set.update(skills_it)
-
-        # Use text after "job description:"
-        desc_start = body.lower().find("job description:")
-        if desc_start == -1:
-            continue
-        desc_text = body[desc_start + len("job description:"):].strip()
-
-        # sentence split (simple '.' split)
-        sentences = [s.strip() for s in desc_text.split(".") if s.strip()]
-        for i, sentence in enumerate(sentences):
-            sentence = sentence.replace("\n", " ")
-
-            # collect ALL matched IT skills in this sentence
-            matched_skills: List[str] = []
-            for skill_lower in skills_it:
-                boundary_pat = re.compile(r'(?<!\w)' + re.escape(skill_lower) + r'(?!\w)', flags=re.IGNORECASE)
-                if boundary_pat.search(sentence):
-                    matched_skills.append(skill_lower)
-
-            if not matched_skills:
-                continue
-
-            # create one row PER matched skill
-            for matched_skill in matched_skills:
-                pattern = re.compile(r'(?<!\w)' + re.escape(matched_skill) + r'(?!\w)', flags=re.IGNORECASE)
-                masked_sentence = pattern.sub('[MASK]', sentence, count=1)
-
-                # check token budget for center
-                center_tokens = tokenizer.tokenize(masked_sentence)
-                if len(center_tokens) >= MAX_TOKENS - 2:
-                    continue
-
-                # add left/right context around the center under MAX_TOKENS
-                left_sentences  = sentences[:i]
-                right_sentences = sentences[i+1:]
-
-                budget = MAX_TOKENS - len(center_tokens) - 2
-                left_budget  = budget // 2
-                right_budget = budget - left_budget
-
-                left_context,  used_left  = add_tokens_side([], left_sentences,  left_budget,  reverse=True)
-                right_context, used_right = add_tokens_side([], right_sentences, right_budget, reverse=False)
-
-                remaining = budget - (used_left + used_right)
-                if remaining > 0:
-                    left_context, extra_used_left = add_tokens_side(left_context, left_sentences, remaining // 2, reverse=True)
-                    remaining -= extra_used_left
-                if remaining > 0:
-                    right_context, extra_used_right = add_tokens_side(right_context, right_sentences, remaining, reverse=False)
-
-                full_text = " ".join(left_context + [masked_sentence] + right_context)
-                if "[MASK]" not in full_text:
-                    continue
-
-                # include original row index
-                results.append({
-                    "row_idx": int(orig_idx),
-                    "true_skill": matched_skill,
-                    "masked_sentence": full_text,
-                    "lot_v7_career_area_name": row.get("lot_v7_career_area_name", np.nan),
-                    "salary": row.get("salary", np.nan),
-                    "onet_name": row.get("onet_name", np.nan),
-                    "lot_v7_occupation_name": row.get("lot_v7_occupation_name", np.nan),
-                    "lot_v7_specialized_occupation_name": row.get("lot_v7_specialized_occupation_name", np.nan),
-                    "file_path": file_path,
-                })
-
-    return results
+    return preprocess_rows(df, file_path)
 
 # ─── sample train/test (or reuse) ───────
 def load_or_sample_train_test_paths(
@@ -411,8 +438,98 @@ def process_findings(
         for (year, yyyy_mm), cnt in sorted(group_counts.items()):
             g.write(f"[{year} | {yyyy_mm}] total_rows: {cnt}\n")
 
+# ─── Debug mode: one file, 10 original rows ──────
+def debug_mode(debug_file: str, n_rows: int = 10):
+    """
+    디버그 모드:
+      - debug_file 로 지정한 파일 하나만 사용
+      - 그 파일에서 원본 row 최대 n_rows개 샘플링
+      - 이 row들에 대한 전처리 결과 전체를 debug_sample.csv.gz 로 저장
+    """
+    if not os.path.exists(debug_file):
+        raise FileNotFoundError(f"debug_file not found: {debug_file}")
+
+    print(f"[DEBUG] Using file: {debug_file}")
+
+    # 원본 파일 읽기
+    df = pd.read_csv(
+        debug_file,
+        compression="gzip" if debug_file.endswith(".gz") else None,
+        low_memory=False
+    )
+
+    if "skills_name" not in df.columns or "body" not in df.columns:
+        raise RuntimeError("Input file does not contain 'skills_name' and 'body' columns.")
+
+    df = df.dropna(subset=["skills_name", "body"])
+    if df.empty:
+        print("[DEBUG] No rows with both skills_name and body.")
+        return
+
+    # 원본 row 최대 n_rows개 랜덤 선택
+    if len(df) > n_rows:
+        df_subset = df.sample(n=n_rows, random_state=42)
+    else:
+        df_subset = df
+
+    print(f"[DEBUG] Selected {len(df_subset)} original rows")
+
+    # 전처리 수행
+    results = preprocess_rows(df_subset, debug_file)
+    print(f"[DEBUG] Generated {len(results)} processed rows from {len(df_subset)} original rows")
+
+    if not results:
+        print("[DEBUG] No processed rows generated from selected originals.")
+        return
+
+    out_path = os.path.join(OUTPUT_ROOT, "debug_sample.csv.gz")
+    pd.DataFrame(results).to_csv(out_path, index=False, compression="gzip")
+    print(f"[DEBUG] Saved processed rows → {out_path}")
+
+    print("\n[DEBUG] Example rows:")
+    print(pd.DataFrame(results)[["row_idx", "true_skill", "masked_sentence"]].head(5))
+
 # ─── Main ───────────────────────────────
 def main():
+    global tokenizer
+
+    parser = argparse.ArgumentParser(description="Preprocess job postings (ONLY IT skills)")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="If set, run in debug mode on a single file and up to N original rows."
+    )
+    parser.add_argument(
+        "--debug_file",
+        type=str,
+        default=None,
+        help="CSV/CSV.GZ file path for debug mode (required when --debug is set)."
+    )
+    parser.add_argument(
+        "--debug_n",
+        type=int,
+        default=10,
+        help="Number of original rows to use in debug mode (default: 10)."
+    )
+    parser.add_argument(
+        "--bert_path",
+        type=str,
+        default=MODEL_NAME,
+        help="Path or HF model name for BertTokenizer (default: bert-base-uncased)."
+    )
+    args = parser.parse_args()
+
+    # tokenizer 로드
+    tokenizer = load_tokenizer(args.bert_path)
+
+    # 디버그 모드
+    if args.debug:
+        if args.debug_file is None:
+            raise ValueError("--debug_file must be provided when using --debug mode.")
+        debug_mode(debug_file=args.debug_file, n_rows=args.debug_n)
+        return
+
+    # 일반 모드 (기존 전체 파이프라인)
     with open(GLOBAL_LOG, "w") as g:
         g.write("Preprocessing Log (ONLY IT skills)\n")
         g.write("==================================\n")
