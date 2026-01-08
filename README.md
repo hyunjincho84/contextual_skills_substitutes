@@ -22,4 +22,4 @@ You can use either **conda** or **Python venv**.
 After activating the virtual environment, run the following command:
 
 ```bash
-bash ./train_three_models.sh
+ ./command/train_three_models.sh
