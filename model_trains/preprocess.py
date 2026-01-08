@@ -31,11 +31,10 @@ Plus:
 
 Debug mode
 ----------
-- --debug 사용 시:
-    * --debug_file 로 지정한 CSV(.gz) 파일 하나만 사용 (필수)
-    * 그 파일에서 원본 row를 최대 --debug_n 개 샘플링 (기본 10)
-    * 이 row들에 대한 전처리 결과 전체를
-      OUTPUT_ROOT/debug_sample.csv.gz 에 저장
+	•	Uses only one input CSV (or .csv.gz) file specified by --debug_file (required).
+	•	Samples at most --debug_n rows from the file (default: 10).
+	•	Writes the complete preprocessing results for the sampled rows to
+OUTPUT_ROOT/debug_sample.csv.gz.
 """
 
 import os, re, json, glob, random, argparse
@@ -72,7 +71,7 @@ os.makedirs(OUTPUT_ROOT, exist_ok=True)
 for d in ["train", "test", "findings"]:
     os.makedirs(os.path.join(OUTPUT_ROOT, d), exist_ok=True)
 
-tokenizer = None  # main()에서 로드
+tokenizer = None  # load from main()
 all_skills_set: Set[str] = set()
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -139,9 +138,9 @@ def load_tokenizer(model_name_or_path: str) -> BertTokenizer:
 # ─── token budget helpers ───────────────
 def add_tokens_side(context_list, sentences, budget, reverse=False):
     """
-    sentences의 단어들을 토큰 예산(budget) 안에서 왼쪽/오른쪽 컨텍스트로 채워 넣는다.
-    같은 sentences에 대해 이 함수를 여러 번 호출하면 중복이 생길 수 있으므로
-    각 side마다 한 번만 호출해서 사용한다.
+    Fills the left and right context of a sentence within a given token budget.
+    Since calling this function multiple times on the same sentence may introduce duplicate tokens,
+    it should be invoked at most once per side (left/right) for each sentence.
     """
     if reverse:
         sentences = list(reversed(sentences))
@@ -162,10 +161,11 @@ def add_tokens_side(context_list, sentences, budget, reverse=False):
             used += len(word_tokens)
     return context_list, used
 
-# ─── 공통 전처리 로직: DataFrame subset ─────
+# ─── Common preprocessing logic: DataFrame subset ─────
 def preprocess_rows(df_subset: pd.DataFrame, file_path: str) -> List[dict]:
     """
-    df_subset (한 파일의 일부 row 또는 전체)에 대해서만 전처리 수행.
+    Performs preprocessing only on `df_subset`, which may contain
+    either a subset of rows from a single file or the entire file.
     """
     results: List[dict] = []
 
@@ -257,7 +257,7 @@ def preprocess_rows(df_subset: pd.DataFrame, file_path: str) -> List[dict]:
 
     return results
 
-# ─── 전체 파일 전처리 (train/test/findings용) ─────
+# ─── Process all the data (train/test/findings) ─────
 def preprocess_file(file_path: str) -> List[dict]:
     want_cols = [
         "skills_name",
@@ -267,6 +267,7 @@ def preprocess_file(file_path: str) -> List[dict]:
         "onet_name",
         "lot_v7_occupation_name",
         "lot_v7_specialized_occupation_name",
+        "soc_2_name"
     ]
     try:
         df = pd.read_csv(
@@ -441,17 +442,17 @@ def process_findings(
 # ─── Debug mode: one file, 10 original rows ──────
 def debug_mode(debug_file: str, n_rows: int = 10):
     """
-    디버그 모드:
-      - debug_file 로 지정한 파일 하나만 사용
-      - 그 파일에서 원본 row 최대 n_rows개 샘플링
-      - 이 row들에 대한 전처리 결과 전체를 debug_sample.csv.gz 로 저장
+    Debug mode:
+	•	Uses only the single file specified by debug_file.
+	•	Samples up to n_rows original rows from that file.
+	•	Saves the complete preprocessing outputs for these rows to debug_sample.csv.gz.
     """
     if not os.path.exists(debug_file):
         raise FileNotFoundError(f"debug_file not found: {debug_file}")
 
     print(f"[DEBUG] Using file: {debug_file}")
 
-    # 원본 파일 읽기
+    # read original file
     df = pd.read_csv(
         debug_file,
         compression="gzip" if debug_file.endswith(".gz") else None,
@@ -466,7 +467,7 @@ def debug_mode(debug_file: str, n_rows: int = 10):
         print("[DEBUG] No rows with both skills_name and body.")
         return
 
-    # 원본 row 최대 n_rows개 랜덤 선택
+    # Randomly select up to n_rows original rows
     if len(df) > n_rows:
         df_subset = df.sample(n=n_rows, random_state=42)
     else:
@@ -474,7 +475,7 @@ def debug_mode(debug_file: str, n_rows: int = 10):
 
     print(f"[DEBUG] Selected {len(df_subset)} original rows")
 
-    # 전처리 수행
+   
     results = preprocess_rows(df_subset, debug_file)
     print(f"[DEBUG] Generated {len(results)} processed rows from {len(df_subset)} original rows")
 
@@ -519,17 +520,17 @@ def main():
     )
     args = parser.parse_args()
 
-    # tokenizer 로드
+    # load tokenizer
     tokenizer = load_tokenizer(args.bert_path)
 
-    # 디버그 모드
+    # debug mode
     if args.debug:
         if args.debug_file is None:
             raise ValueError("--debug_file must be provided when using --debug mode.")
         debug_mode(debug_file=args.debug_file, n_rows=args.debug_n)
         return
 
-    # 일반 모드 (기존 전체 파이프라인)
+    
     with open(GLOBAL_LOG, "w") as g:
         g.write("Preprocessing Log (ONLY IT skills)\n")
         g.write("==================================\n")

@@ -23,7 +23,7 @@ from gensim.models import Word2Vec
 from gensim.models.keyedvectors import KeyedVectors
 
 # ========================= Config =========================
-TRAIN_INDEX_CSV   = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/sampled_files_train.csv"
+TRAIN_INDEX_CSV   = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/sampled_files_train.csv"
 SKILL_COL         = "skills_name"
 TARGET_SKILLS_CSV = "./target_skills.csv"  # must contain column 'NAME'
 CHUNKSIZE         = 200_000
@@ -43,7 +43,7 @@ EPOCHS       = 5
 WORKERS      = max(1, os.cpu_count() - 1)
 
 # Output
-OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_unshuffle"
+OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_new"
 MODEL_NAME = f"skill2vec_norm_sg{SG}_d{VECTOR_SIZE}_win{WINDOW}_neg{NEGATIVE}_ep{EPOCHS}"
 MODEL_PATH = os.path.join(OUT_DIR, f"{MODEL_NAME}.model")
 KV_PATH    = os.path.join(OUT_DIR, f"{MODEL_NAME}.kv")
@@ -149,7 +149,7 @@ def train_skill2vec(sentences, resume: bool = True) -> Word2Vec:
         print(f"[INFO] Epoch {epoch+1}/{EPOCHS} starting...")
 
         # 🔀 Shuffle sentences each epoch for better SGD mixing
-        # random.shuffle(cached)
+        random.shuffle(cached)
 
         start = time.time()
         model.train(cached, total_examples=len(cached), epochs=1, report_delay=30.0)

@@ -14,25 +14,25 @@ from tqdm import tqdm
 from model import BERTForSkillPrediction
 
 # ─── Config ───────────────────────────────────────────────────────────────
-# 학습 대상: preprocessed_www/train/**/preprocessed_YYYY-MM.csv.gz
-DATA_ROOT      = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www"
+# Training target: preprocessed_www/train/**/preprocessed_YYYY-MM.csv.gz
+DATA_ROOT      = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new"
 TRAIN_DIR      = os.path.join(DATA_ROOT, "train")
 VOCAB_PATH     = os.path.join(DATA_ROOT, "skill2idx.json")
 
-# 모델/체크포인트
+# model/ckpt
 MODEL_NAME     = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687"
-CKPT_DIR       = "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)"
+CKPT_DIR       = "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new"
 BEST_MODEL_PT  = os.path.join(CKPT_DIR, "best_model.pt")
-RESUME_FROM    = None  # 예: os.path.join(CKPT_DIR, "epoch_3.pt")
+RESUME_FROM    = None  # ex: os.path.join(CKPT_DIR, "epoch_3.pt")
 
-# 하이퍼파라미터
+# hyperparameter
 MAX_LEN        = 512
 BATCH_SIZE     = 64
 EPOCHS         = 3
 LR             = 2e-5
 NUM_WORKERS    = 2
 PIN_MEMORY     = True
-USE_AMP        = True  # fp16 혼합정밀도 사용(가능할 때)
+USE_AMP        = True
 SEED           = 42
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -51,9 +51,9 @@ def iter_train_files(train_dir: str) -> List[str]:
 # ─── Dataset ──────────────────────────────────────────────────────────────
 class MaskedSkillDataset(Dataset):
     """
-    한 개의 preprocessed_YYYY-MM.csv.gz 파일을 로드하여:
-    - masked_sentence에 [MASK]가 있고
-    - true_skill이 vocab에 존재하는 샘플만 사용
+    Loads a single preprocessed_YYYY-MM.csv.gz file and uses only samples that:
+    - contain a [MASK] token in masked_sentence, and
+    - have true_skill present in the vocabulary.
     """
     def __init__(self, csv_path: str, tokenizer: BertTokenizer, skill2idx: dict, max_len: int):
         self.tokenizer = tokenizer
@@ -85,11 +85,11 @@ class MaskedSkillDataset(Dataset):
         input_ids = enc["input_ids"].squeeze(0)
         attention_mask = enc["attention_mask"].squeeze(0)
 
-        # 첫 번째 [MASK] 위치를 라벨 토큰의 대표 위치로 사용
+         # Use the first [MASK] position as the representative label position
         mask_positions = (input_ids == self.tokenizer.mask_token_id).nonzero(as_tuple=True)
         if mask_positions[0].numel() == 0:
-            # 드물게 토크나이저 전처리 중 [MASK]가 잘리는 경우 방어적으로 처리
-            # (collate_fn에서 None 제거)
+            # Defensive handling for rare cases where [MASK] is truncated during tokenization
+            # (filtered out later in collate_fn)
             return None
         mask_idx = mask_positions[0][0].item()
 
@@ -112,14 +112,14 @@ def train():
     os.makedirs(CKPT_DIR, exist_ok=True)
     set_seed(SEED)
 
-    # 토크나이저 & vocab
+    # tokenizer & vocab
     tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
     with open(VOCAB_PATH, "r", encoding="utf-8") as f:
         skill2idx = json.load(f)
     num_skills = len(skill2idx)
     print(f"✅ Vocab loaded: {num_skills} skills")
 
-    # 모델/옵티마/스케일러
+    # Model / optimizer / scaler
     model = BERTForSkillPrediction(MODEL_NAME, num_skills=num_skills).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
@@ -128,7 +128,7 @@ def train():
     start_epoch = 0
     best_loss = float("inf")
 
-    # 이어하기
+    # Resume training if checkpoint is provided
     if RESUME_FROM and os.path.exists(RESUME_FROM):
         print(f"🔄 Resuming from checkpoint: {RESUME_FROM}")
         ckpt = torch.load(RESUME_FROM, map_location="cpu")
@@ -138,7 +138,7 @@ def train():
         best_loss = float(ckpt.get("best_loss", best_loss))
         print(f"▶ Restart at epoch {start_epoch+1}, best_loss={best_loss:.4f}")
 
-    # 학습 대상 파일 목록
+    # List of training files
     files = iter_train_files(TRAIN_DIR)
     if not files:
         raise FileNotFoundError(f"No train files found under: {TRAIN_DIR}")
@@ -147,7 +147,7 @@ def train():
         print(f"\n🔥 Epoch {epoch+1}/{EPOCHS}")
         total_loss, correct, total = 0.0, 0, 0
 
-        # 파일 순서 셔플
+        # Shuffle file order
         random.shuffle(files)
 
         for file_path in tqdm(files, desc="Files", unit="file"):
@@ -191,7 +191,7 @@ def train():
         acc = correct / max(1, total)
         print(f"✅ Epoch {epoch+1} | Loss={avg_loss:.4f} | Acc@1={acc:.4f} | Samples={total:,}")
 
-        # 체크포인트
+        # Save checkpoint
         ckpt_path = os.path.join(CKPT_DIR, f"epoch_{epoch+1}.pt")
         torch.save({
             "epoch": epoch,
@@ -202,7 +202,7 @@ def train():
         }, ckpt_path)
         print(f"💾 Saved checkpoint: {ckpt_path}")
 
-        # 베스트 모델 갱신
+        # Update best model
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model.state_dict(), BEST_MODEL_PT)
