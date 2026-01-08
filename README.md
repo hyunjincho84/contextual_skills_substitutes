@@ -17,9 +17,36 @@ You can use either **conda** or **Python venv**.
 
 ## Training
 
-### Train all models (`train_three_models.sh`)
+### Train all models
 
-After activating the virtual environment, run the following command:
+After activating the virtual environment, run the following command to train all three models (BERT, Skill2vec, conditional probability):
 
 ```bash
  ./command/train_three_models.sh
+
+## Prediction
+
+### Run predictions for all models (BERT, Skill2vec, conditional probability, GPT-5.1)
+
+After training is complete, generate predictions from **all models** by running:
+
+```bash
+./command/pred_all.sh
+
+### Likelihood-based Scoring
+
+To compute **likelihood-based validation scores** for the predicted substitute skills, run:
+
+```bash
+./command/run_scoring.sh
+
+This script computes comparative likelihood scores for each model’s predicted substitutes, which serve as the primary quantitative metric in our analysis.
+
+## Findings
+
+### Extracting Contextual Skill Substitutes
+
+After computing likelihood-based scores, run the following script to **extract final contextual skill substitutes** year-wise and industry-wise:
+
+```bash
+./command/find_substitutes.sh
