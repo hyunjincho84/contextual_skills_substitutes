@@ -23,8 +23,8 @@ from tqdm import tqdm
 # ===== Paths =====
 CONDPROB_DIR = "/home/jovyan/LEM_data2/hyunjincho/condprob"
 COOC_PROBS   = os.path.join(CONDPROB_DIR, "cooc_probs.csv.gz")  # expects columns: s1, s2, p_cond
-TEST_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/test"
-OUT_DIR      = "/home/jovyan/LEM_data2/hyunjincho/condprob"
+TEST_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test"
+OUT_DIR      = "/home/jovyan/LEM_data2/hyunjincho/condprob_new"
 CHUNKSIZE    = 200_000
 TOPK         = 5
 MAX_PRINT_PER_REASON = 10
@@ -109,7 +109,6 @@ def main():
     total = 0
     per_year_counts = {}
 
-    # skip stats
     skipped_counts = {
         "no_truth_column": 0,
         "non_string_truth": 0,
@@ -131,7 +130,7 @@ def main():
         if month is None:
             continue
 
-        pred_buffer = []  # collect rows for THIS monthly file
+        pred_buffer = []
 
         read_kwargs = dict(chunksize=CHUNKSIZE)
         if fp.endswith(".gz"):
@@ -142,7 +141,6 @@ def main():
             if n == 0:
                 break
 
-            # find truth column in this chunk
             true_col = next((c for c in ["true_skill", "target_skill", "label"] if c in df.columns), None)
             if true_col is None:
                 skipped_counts["no_truth_column"] += 1
@@ -152,7 +150,21 @@ def main():
 
             has_masked   = "masked_sentence" in df.columns
             has_sentence = "sentence" in df.columns
-            keep_cols = [true_col] + (["masked_sentence"] if has_masked else (["sentence"] if has_sentence else []))
+
+            # ✅ 추가: row_idx / soc_2_name 있으면 같이 저장
+            has_row_idx  = "row_idx" in df.columns
+            has_soc2     = "soc_2_name" in df.columns
+
+            keep_cols = [true_col]
+            if has_masked:
+                keep_cols.append("masked_sentence")
+            elif has_sentence:
+                keep_cols.append("sentence")
+
+            if has_row_idx:
+                keep_cols.append("row_idx")
+            if has_soc2:
+                keep_cols.append("soc_2_name")
 
             sub = df[keep_cols].dropna(subset=[true_col])
             if sub.empty:
@@ -166,7 +178,6 @@ def main():
                         skipped_examples["non_string_truth"].append(str(truth_raw))
                     continue
 
-                # Normalize truth to dataset rule (spaces kept)
                 s1 = normalize_for_dataset(truth_raw)
 
                 if s1 not in cond:
@@ -175,7 +186,7 @@ def main():
                         skipped_examples["s1_not_in_cond"].append(f"{truth_raw} -> {s1}")
                     continue
 
-                # candidates excluding self
+                # ✅ candidates excluding self
                 pairs = [(s2, p) for (s2, p) in cond[s1] if s2 != s1]
                 if not pairs:
                     skipped_counts["no_candidates"] += 1
@@ -183,7 +194,10 @@ def main():
                         skipped_examples["no_candidates"].append(f"{truth_raw} -> {s1}")
                     continue
 
-                preds = [s for (s, _) in pairs[:TOPK]]
+                top_pairs = pairs[:TOPK]
+                preds  = [s for (s, _) in top_pairs]
+                probs  = [float(p) for (_, p) in top_pairs]   # ✅ pred_top5_probs
+
                 if not preds:
                     continue
 
@@ -196,12 +210,19 @@ def main():
                 elif has_sentence:
                     masked_sentence = row.get("sentence", "")
 
+                # ✅ row_idx / soc_2_name (없으면 빈 값)
+                row_idx_val = row.get("row_idx", "")
+                soc2_val    = row.get("soc_2_name", "")
+
                 pred_buffer.append({
                     "year": year,
                     "file": os.path.basename(fp),
-                    "truth": s1,                      # SAVE WITH SPACES
-                    "pred_top1": preds[0],            # SAVE WITH SPACES
-                    "pred_top5": "|".join(preds),     # SAVE WITH SPACES
+                    "row_idx": row_idx_val,
+                    "soc_2_name": soc2_val,
+                    "truth": s1,                          # space-form
+                    "pred_top1": preds[0],                # space-form
+                    "pred_top5": "|".join(preds),         # space-form
+                    "pred_top5_probs": "|".join([f"{p:.6f}" for p in probs]),
                     "masked_sentence": masked_sentence
                 })
 
@@ -210,7 +231,6 @@ def main():
             write_preds_month(year, month, pred_buffer)
         gc.collect()
 
-    # Summary (no accuracy: truth excluded)
     print("\n========== Conditional-Prob Prediction Summary (FULL TEST SET) ==========")
     print(f"Saved predictions (rows): {total:,}")
 
@@ -222,7 +242,6 @@ def main():
     total_skipped = sum(skipped_counts.values())
     print(f"Total skipped:                  {total_skipped}")
 
-    # Year summary
     year_summary = pd.DataFrame(
         sorted(per_year_counts.items()),
         columns=["year", "evaluated_samples"]

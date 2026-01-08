@@ -6,6 +6,14 @@ Evaluate Skill2Vec by cosine similarity (truth excluded) on the FULL test set (n
 - SAVES monthly outputs to: {OUT_DIR}/pred/{YYYY}/predictions_{YYYY-MM}.csv.gz
 """
 
+# -*- coding: utf-8 -*-
+"""
+Evaluate Skill2Vec by cosine similarity (truth excluded) on the FULL test set (no sampling).
+- Dataset-normalization keeps spaces; W2V lookup uses spaces->underscores.
+- Streams each monthly CSV in the test set and evaluates all rows.
+- SAVES monthly outputs to: {OUT_DIR}/pred/{YYYY}/predictions_{YYYY-MM}.csv.gz
+"""
+
 import os
 import re
 import gc
@@ -16,9 +24,9 @@ from tqdm import tqdm
 from gensim.models import Word2Vec
 
 # ========== Config ==========
-MODEL_PATH = "/home/jovyan/LEM_data2/hyunjincho/skill2vec/skill2vec_norm_sg1_d300_win50_neg10_ep5.model"
-TEST_ROOT  = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/test"
-OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec"
+MODEL_PATH = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_new/skill2vec_norm_sg1_d300_win50_neg10_ep5.model"
+TEST_ROOT  = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test"
+OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_pred_new"
 CHUNKSIZE  = 200_000
 MAX_PRINT_PER_REASON = 10
 TOPK = 5
@@ -41,7 +49,6 @@ def from_w2v_key(key: str) -> str:
     return key.replace("_", " ")
 
 def iter_test_files(root: str):
-    # preprocessed_YYYY-MM.csv or .csv.gz
     pattern1 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv.gz"))
     pattern2 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv"))
     files = sorted(list(set(pattern1 + pattern2)))
@@ -49,7 +56,6 @@ def iter_test_files(root: str):
         yield fp
 
 def extract_year_month(path: str):
-    # filenames like: preprocessed_2010-01.csv or .csv.gz
     m = re.search(r"preprocessed_(20\d{2})-(\d{2})\.csv(?:\.gz)?$", os.path.basename(path))
     if not m:
         y = re.search(r"/(20\d{2})/", path)
@@ -63,13 +69,11 @@ def month_out_path(year: str, month: int) -> str:
     return os.path.join(year_dir, f"predictions_{year}-{month:02d}.csv.gz")
 
 def write_preds_month(year: str, month: int, rows: list):
-    """Save ONE monthly file as gzip (no append)."""
     out_path = month_out_path(year, month)
     df = pd.DataFrame(rows)
     df.to_csv(out_path, index=False, compression="gzip")
 
 def main():
-    # load model
     model = Word2Vec.load(MODEL_PATH)
     wv = model.wv
     cand_keys = wv.index_to_key
@@ -78,7 +82,6 @@ def main():
     total = 0
     per_year_counts = {}
 
-    # skip stats
     skipped_not_string = 0
     skipped_not_in_vocab = 0
     skipped_no_candidates = 0
@@ -92,7 +95,7 @@ def main():
         if month is None:
             continue
 
-        pred_buffer = []  # collect for THIS month file; write once at the end
+        pred_buffer = []
 
         read_kwargs = dict(chunksize=CHUNKSIZE)
         if fp.endswith(".gz"):
@@ -103,17 +106,29 @@ def main():
             if n == 0:
                 break
 
-            # 필요 컬럼만
             has_masked = "masked_sentence" in df.columns
-            cols = ["true_skill"] + (["masked_sentence"] if has_masked else [])
-            sub = df[cols].dropna(subset=["true_skill"])
+            has_row_idx = "row_idx" in df.columns
+            has_soc2 = "soc_2_name" in df.columns
 
+            cols = ["true_skill"]
+            if has_masked:
+                cols.append("masked_sentence")
+            if has_row_idx:
+                cols.append("row_idx")
+            if has_soc2:
+                cols.append("soc_2_name")
+
+            sub = df[cols].dropna(subset=["true_skill"])
             if sub.empty:
                 continue
 
             for _, row in sub.iterrows():
                 truth_raw = row["true_skill"]
                 masked_sentence = row["masked_sentence"] if has_masked else ""
+
+                # ✅ row_idx / soc_2_name (없으면 빈 값)
+                row_idx_val = row.get("row_idx", "")
+                soc2_val    = row.get("soc_2_name", "")
 
                 if not isinstance(truth_raw, str):
                     skipped_not_string += 1
@@ -132,7 +147,6 @@ def main():
 
                 v_truth = wv.get_vector(truth_key, norm=True)
 
-                # exclude the truth from candidates
                 try:
                     truth_idx = wv.key_to_index[truth_key]
                 except KeyError:
@@ -147,15 +161,18 @@ def main():
                         skipped_examples["no_candidates"].append(truth_space)
                     continue
 
-                # cosine similarities against all, then mask out truth index
                 sims = cand_mat @ v_truth
                 sims[truth_idx] = -np.inf  # exclude truth
 
                 k = min(TOPK, len(cand_keys) - 1)
                 top_idx = np.argpartition(-sims, k-1)[:k]
                 top_idx = top_idx[np.argsort(-sims[top_idx])]
+
                 preds_keys = [cand_keys[i] for i in top_idx]
                 preds_space = [from_w2v_key(k) for k in preds_keys]
+
+                # ✅ "prob" 대신 cosine similarity score 저장 (컬럼명은 통일)
+                top_sims = sims[top_idx].astype(float).tolist()
 
                 total += 1
                 per_year_counts[year] = per_year_counts.get(year, 0) + 1
@@ -163,13 +180,15 @@ def main():
                 pred_buffer.append({
                     "year": year,
                     "file": os.path.basename(fp),
+                    "row_idx": row_idx_val,
+                    "soc_2_name": soc2_val,
                     "truth": truth_space,
                     "pred_top1": preds_space[0],
                     "pred_top5": "|".join(preds_space),
+                    "pred_top5_probs": "|".join([f"{v:.6f}" for v in top_sims]),
                     "masked_sentence": masked_sentence
                 })
 
-        # 월 파일 하나 끝났을 때 한 번만 저장 (gzip)
         if pred_buffer:
             write_preds_month(year, month, pred_buffer)
         gc.collect()
@@ -183,7 +202,6 @@ def main():
     print(f"No candidates: {skipped_no_candidates}")
     print(f"Total skipped: {skipped_not_string + skipped_not_in_vocab + skipped_no_candidates}")
 
-    # Year summary
     year_summary = pd.DataFrame(
         sorted(per_year_counts.items()),
         columns=["year", "evaluated_samples"]
