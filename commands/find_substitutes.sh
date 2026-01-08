@@ -32,8 +32,8 @@ PYTHON_BIN="python3"
 TARGET_SKILL="python"
 
 # BERT prediction roots
-PRED_ROOT_SOC2="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred"
-PRED_ROOT_YEAR="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred"
+PRED_ROOT_SOC2="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new_test/pred"
+PRED_ROOT_YEAR="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new_test/pred"
 
 # outputs
 OUT_SOC2="../substitute_by_area/subs_python_by_soc2.csv"
