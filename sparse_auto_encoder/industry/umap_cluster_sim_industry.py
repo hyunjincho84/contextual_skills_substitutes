@@ -459,6 +459,11 @@ def main():
     )
     print(f"[INFO] features extracted (rows={len(df_feat)})")
 
+    # ✅ NEW: save features.parquet (same as previous pipeline)
+    out_feat = os.path.join(args.out_dir, "features.parquet")
+    df_feat.to_parquet(out_feat, index=False)
+    print(f"[OK] Saved: {out_feat}")
+    
     feat_cols = [c for c in df_feat.columns if re.fullmatch(r"f\d+", c)]
     print(f"[INFO] feature dim = {len(feat_cols)} (repr={args.repr})")
 
