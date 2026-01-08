@@ -10,7 +10,7 @@ We aim to quantify how **skills can substitute each other depending on the occup
 
 ## Setup
 
-### 1. Create a virtual environment
+### Create a virtual environment
 
 All required dependencies are listed in `./requirements.txt`.  
 You can use either **conda** or **Python venv**.
