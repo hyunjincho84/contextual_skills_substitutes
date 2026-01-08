@@ -21,10 +21,10 @@ import pandas as pd
 from tqdm import tqdm
 
 # ===== Paths =====
-CONDPROB_DIR = "/home/jovyan/LEM_data2/hyunjincho/condprob"
+CONDPROB_DIR = "/home/jovyan/LEM_data2/hyunjincho/condprob_new"
 COOC_PROBS   = os.path.join(CONDPROB_DIR, "cooc_probs.csv.gz")  # expects columns: s1, s2, p_cond
 TEST_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test"
-OUT_DIR      = "/home/jovyan/LEM_data2/hyunjincho/condprob_new"
+OUT_DIR      = "/home/jovyan/LEM_data2/hyunjincho/condprob_pred_new"
 CHUNKSIZE    = 200_000
 TOPK         = 5
 MAX_PRINT_PER_REASON = 10
