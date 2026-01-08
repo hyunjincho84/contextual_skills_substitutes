@@ -34,10 +34,6 @@ def get_feat_cols(df):
     return sorted(cols, key=lambda x: int(x[1:]))
 
 def topk_feature_ids(X, topk, exclude=None):
-    """
-    X: (n, d)
-    exclude: set of feature indices to skip
-    """
     mu = X.mean(axis=0)
     d = mu.shape[0]
 
@@ -56,45 +52,13 @@ def topk_feature_ids(X, topk, exclude=None):
 def overlap_count(a, b):
     return len(np.intersect1d(a, b, assume_unique=False))
 
-def plot_overlap_heatmap(mat, labels, out_png, title):
-    fig = plt.figure(figsize=(7.5, 6.5))
-    ax = fig.add_subplot(1, 1, 1)
-
-    im = ax.imshow(mat, cmap="RdBu_r", vmin=0, vmax=int(mat.max()) if mat.max() > 0 else 1)
-
-    ax.set_xticks(range(len(labels)))
-    ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=15)
-    ax.set_yticklabels(labels, fontsize=15)
-
-    ax.set_xlabel("")
-    ax.set_ylabel("")
-    ax.set_title(title, pad=12, fontsize=26)
-
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            ax.text(j, i, int(mat[i, j]), ha="center", va="center", fontsize=12)
-
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("")
-
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=300)
-    plt.close()
-
 def parse_layers(s: str):
     if "-" in s:
         a, b = s.split("-")
         return list(range(int(a), int(b) + 1))
-    return [int(x) for x in s.split(",")]
+    return [int(x) for x in s.split(",") if x.strip()]
 
 def parse_years_arg(years_str: str):
-    """
-    Accept:
-      - "all"
-      - "2010-2023"
-      - "2010,2012,2015"
-    """
     if years_str is None:
         return None
     years_str = years_str.strip().lower()
@@ -103,9 +67,82 @@ def parse_years_arg(years_str: str):
     if "-" in years_str:
         a, b = years_str.split("-")
         return list(range(int(a), int(b) + 1))
-    return [int(x) for x in years_str.split(",")]
+    return [int(x) for x in years_str.split(",") if x.strip()]
 
+def plot_overlap_grid(mats, layer_ids, labels, out_png, title_prefix="Layer", ncols=4, dpi=300):
+    """
+    mats: list of (K,K)
+    layer_ids: list of layer ints
+    labels: tick labels for rows/cols (strings)
+    """
+    assert len(mats) == len(layer_ids)
 
+    n = len(mats)
+    if n == 0:
+        print("[WARN] No matrices to plot (empty).")
+        return
+
+    nrows = int(np.ceil(n / ncols))
+    vmax = int(max([m.max() for m in mats]))
+    vmax = max(vmax, 1)
+
+    K = len(labels)
+
+    # ✅ GridSpec으로 컬러바 전용 column 확보 (마지막 컬럼)
+    # width_ratios: [1,1,1,1,0.06] (ncols=4일 때)
+    width_ratios = [1.0] * ncols + [0.06]
+    fig = plt.figure(figsize=(4.2 * ncols + 1.0, 3.8 * nrows))
+
+    gs = fig.add_gridspec(
+        nrows=nrows,
+        ncols=ncols + 1,
+        width_ratios=width_ratios,
+        wspace=0.35,   # subplot 간 간격
+        hspace=0.45,   # row 간 간격
+    )
+
+    axes = []
+    for r in range(nrows):
+        for c in range(ncols):
+            axes.append(fig.add_subplot(gs[r, c]))
+
+    # 컬러바 전용 축: 오른쪽 마지막 column 전체 사용
+    cax = fig.add_subplot(gs[:, -1])
+
+    im_for_cbar = None
+
+    for i, ax in enumerate(axes):
+        if i >= n:
+            ax.axis("off")
+            continue
+
+        M = mats[i]
+        layer = layer_ids[i]
+
+        im = ax.imshow(M, cmap="RdBu_r", vmin=0, vmax=vmax, aspect="auto")
+        if im_for_cbar is None:
+            im_for_cbar = im
+
+        ax.set_title(f"{title_prefix} {layer:02d}", fontsize=18, pad=8)
+        ax.set_xticks(range(K))
+        ax.set_yticks(range(K))
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10)
+        ax.set_yticklabels(labels, fontsize=10)
+
+        # annotate numbers
+        for rr in range(K):
+            for cc in range(K):
+                ax.text(cc, rr, int(M[rr, cc]), ha="center", va="center", fontsize=8)
+
+    # ✅ 컬러바는 전용 축(cax)에만 그린다 -> 절대 안 겹침
+    if im_for_cbar is not None:
+        cbar = fig.colorbar(im_for_cbar, cax=cax)
+        cbar.set_label("Overlap", fontsize=12)
+
+    # ✅ tight_layout/bbox_inches="tight" 제거 (GridSpec이 이미 레이아웃 관리)
+    fig.savefig(out_png, dpi=dpi)
+    plt.close(fig)
+    
 # -------------------------
 # Main
 # -------------------------
@@ -128,8 +165,19 @@ def main():
     ap.add_argument("--max-iters", type=int, default=100,
                     help="safety cap for iterative common-feature removal")
 
+    # ✅ single-grid output controls
+    ap.add_argument("--grid-out-name", type=str, default="heatmap_overlap_all_layers.png")
+    ap.add_argument("--grid-cols", type=int, default=4)
+
+    # ✅ per-layer CSV location: out_dir/csvs/
+    ap.add_argument("--csv-subdir", type=str, default="csvs",
+                    help="Subdirectory under --out-dir to store per-layer CSVs. (default: csvs)")
+
     args = ap.parse_args()
     ensure_dir(args.out_dir)
+
+    csv_dir = os.path.join(args.out_dir, args.csv_subdir)
+    ensure_dir(csv_dir)
 
     mpl.rcParams.update({
         "font.size": args.font_size,
@@ -162,7 +210,6 @@ def main():
         if "year" not in df.columns:
             raise ValueError("[ERROR] --group-by year requires column: year")
 
-        # normalize year to int
         df["group"] = df["year"].astype(int)
 
         yrs = parse_years_arg(args.years)
@@ -174,14 +221,18 @@ def main():
             group_order = group_order[:args.max_groups]
             df = df[df["group"].isin(group_order)]
 
-        # legend/label as string (heatmap ticklabels)
         group_order = [int(y) for y in group_order]
+
+    labels = [str(x) for x in group_order]
 
     # -------------------------
     # Logs
     # -------------------------
     all_overlap_rows = []
     all_counts = []
+
+    mats = []
+    layer_ids = []
 
     # -------------------------
     # Layer loop
@@ -209,7 +260,6 @@ def main():
                 "n_samples": int(n)
             })
 
-        # mean activation cache
         X_by_group = {
             g: subL[subL["group"] == g][feat_cols].to_numpy(np.float32)
             for g in group_order
@@ -235,7 +285,6 @@ def main():
                 else:
                     top_sets[g] = topk_feature_ids(X, args.topk, exclude=blacklist)
 
-            # intersection over ALL groups
             common = set(top_sets[group_order[0]]) if len(group_order) > 0 else set()
             for g in group_order[1:]:
                 common &= set(top_sets[g])
@@ -274,18 +323,26 @@ def main():
                     "excluded_features": int(len(blacklist)),
                 })
 
-        # save csv + heatmap
-        labels = [str(x) for x in group_order]
-        pd.DataFrame(M, index=labels, columns=labels).to_csv(
-            os.path.join(args.out_dir, f"overlap_matrix_layer_{int(layer):02d}.csv")
-        )
+        # ✅ ALWAYS save per-layer CSV into out_dir/csvs/
+        out_csv = os.path.join(csv_dir, f"overlap_matrix_layer_{int(layer):02d}.csv")
+        pd.DataFrame(M, index=labels, columns=labels).to_csv(out_csv)
 
-        plot_overlap_heatmap(
-            M,
-            labels,
-            os.path.join(args.out_dir, f"heatmap_overlap_layer_{int(layer):02d}.png"),
-            title=f"Layer {int(layer):02d}",
-        )
+        mats.append(M)
+        layer_ids.append(int(layer))
+
+    # ✅ single combined grid image
+    out_grid = os.path.join(args.out_dir, args.grid_out_name)
+    plot_overlap_grid(
+        mats=mats,
+        layer_ids=layer_ids,
+        labels=labels,
+        out_png=out_grid,
+        title_prefix="Layer",
+        ncols=args.grid_cols,
+        dpi=300,
+    )
+    print(f"[OK] Saved combined heatmap grid -> {out_grid}")
+    print(f"[OK] Saved per-layer CSVs -> {csv_dir}")
 
     # -------------------------
     # Save logs
@@ -313,9 +370,11 @@ python3 overlap_by_year.py \
   --features-parquet ./python_yearly/features.parquet \
   --out-dir ./python_yearly/overlaps \
   --group-by year \
-  --years 2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025 \
+  --years 2010-2025 \
   --topk 128 \
   --layers 1-12 \
   --samples-per-group 1000 \
-  --font-size 16
+  --font-size 16 \
+  --grid-cols 4 \
+  --grid-out-name heatmap_overlap_all_layers.png
 """
