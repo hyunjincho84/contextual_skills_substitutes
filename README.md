@@ -8,35 +8,18 @@ We aim to quantify how **skills can substitute each other depending on the occup
 
 ---
 
-## Repository Structure
-```
-contextual_skills_substitutes/
-│
-├── exposure_gain/                  # External validation using Google Trends data
-│   ├── get_graph.py                # Visualizes correlations between model scores and trend data
-│   ├── get_margin.py               # Computes margin = (trend_diff - model_loss)
-│   ├── get_trend.py                # Fetches and aggregates Google Trends time-series
-│
-├── model_tests/                    # Model evaluation and skill substitution testing
-│   ├── scoring.py                  # Calculates Contextual Substitute Validation
-│   ├── test_bert.py                # Tests our model
-│   ├── test_conditional_prob.py    # Tests conditional probablility
-│   ├── test_skill2vec.py           # Tests skill2vec
-│
-├── model_trains/                   # Training and pretraining modules for skill models
-│   ├── conditional_prob.py         # Trains conditional probablility
-│   ├── fine_tune_bert.py           # Fine-tunes our model
-│   ├── model.py                    # Defines model architectures
-│   ├── preprocess.py               # Preprocessing and skill masking from job postings
-│   ├── pretrain.py                 # Domain-specific BERT pretraining on job posting corpus
-│   ├── skill2vec.py                # Trains Skill2Vec
-│
-├── substitute_by_area/             # Occupational group–wise substitution analysis
-│   └── areawise_substitute.py      # Aggregates substitutes by SOC MajorGroup
-│
-├── substitute_by_time/             # Temporal substitution dynamics (yearly evolution)
-│   └── yearwise_top5_substitutes.py# Finds year-wise Top-5 contextual substitutes for a skill
-│
-├── requirements.txt                # Python dependencies
-└── README.md                       # Project documentation
-```
+## Setup
+
+### 1. Create a virtual environment
+
+All required dependencies are listed in `requirements.txt`.  
+You can use either **conda** or **Python venv**.
+
+## Training
+
+### Train all models (`train_three_models.sh`)
+
+After activating the virtual environment, run the following command:
+
+```bash
+bash ./train_three_models.sh
