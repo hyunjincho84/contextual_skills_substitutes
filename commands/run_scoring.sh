@@ -64,7 +64,7 @@ echo
 
 
 echo "==== [1/4] Running score_with_llama.py ===="
-$PYTHON_BIN scoring.py \
+$PYTHON_BIN ../model_tests/scoring.py \
   --bert_pred_dir "${DEFAULT_BERT_PRED_DIR}" \
   --w2v_pred_dir "${DEFAULT_W2V_PRED_DIR}" \
   --cond_pred_dir "${DEFAULT_COND_PRED_DIR}" \
@@ -78,7 +78,7 @@ $PYTHON_BIN scoring.py \
 
 echo
 echo "==== [2/4] Running compute_llama_mean.py ===="
-$PYTHON_BIN compute_score_mean.py \
+$PYTHON_BIN ../model_tests/compute_score_mean.py \
   --bert_pred_dir "${DEFAULT_BERT_PRED_DIR}" \
   --w2v_pred_dir "${DEFAULT_W2V_PRED_DIR}" \
   --cond_pred_dir "${DEFAULT_COND_PRED_DIR}" \
@@ -87,7 +87,7 @@ $PYTHON_BIN compute_score_mean.py \
 
 echo
 echo "==== [3/4] Running scoring_gpt.py ===="
-CMD_GPT=( $PYTHON_BIN scoring_gpt.py
+CMD_GPT=( $PYTHON_BIN ../model_tests/scoring_gpt.py
   --in-pattern "${DEFAULT_GPT_IN_PATTERN}"
   --llama-ckpt "${DEFAULT_LLAMA_CHECKPOINT}"
   ${YEARS:+--years "${YEARS[@]}"}
@@ -108,7 +108,7 @@ echo "Running: ${CMD_GPT[*]}"
 
 echo
 echo "==== [4/4] Running compute_gpt_score_mean.py ===="
-$PYTHON_BIN compute_gpt_score_mean.py \
+$PYTHON_BIN ../model_tests/compute_gpt_score_mean.py \
   --gpt-pattern "${DEFAULT_GPT_WITH_SV_PATTERN}" \
   --bert-base "${DEFAULT_BERT_BASE_FOR_GPT_COMPARE}" \
   --max-mismatch-examples "${GPT_COMPARE_MAX_MISMATCH_EX}"
