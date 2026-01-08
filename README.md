@@ -61,9 +61,9 @@ To visualize layer-wise representations using Sparse Autoencoders (SAEs) and vis
 ./command/vis_sae_results.sh
 ```
 This script:
-	•	Extracts SAE features from BERT layers
-	•	Visualizes UMAP embeddings
-	•	Computes element-centric similarity across industries and years
+	•	Extracts SAE features from BERT layers  
+	•	Visualizes UMAP embeddings  
+	•	Computes element-centric similarity across industries and years  
 
 ### Overlap analysis across industries and years
 
@@ -74,9 +74,9 @@ To measure and visualize feature overlap patterns across industries and over tim
 ```
 
 This script generates:
-	•	Industry-wise overlap heatmaps
-	•	Year-wise overlap heatmaps
-	•	Overlap trend graphs and year-difference analyses
+	•	Industry-wise overlap heatmaps  
+	•	Year-wise overlap heatmaps  
+	•	Overlap trend graphs and year-difference analyses  
 
 ### Feature-level activation visualization
 
@@ -86,7 +86,7 @@ To inspect unioned top-K feature activations and their industry-specific structu
 ./command/vis_feature_id.sh
 ```
 This script:
-	•	Identifies top-K activated SAE features per industry
-	•	Iteratively removes globally common features
-	•	Produces unified heatmaps and feature metadata for interpretability analysis
+	•	Identifies top-K activated SAE features per industry  
+	•	Iteratively removes globally common features  
+	•	Produces unified heatmaps and feature metadata for interpretability analysis  
 
