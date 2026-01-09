@@ -41,6 +41,12 @@ After training is complete, generate predictions from **all models** by running:
 ./command/pred_all.sh
 ```
 
+Specifically, this script:
+	•	Runs masked-skill inference using the fine-tuned BERT model  
+	•	Generates similarity-based substitutes using Skill2Vec  
+	•	Computes substitutes from conditional probability baselines  
+	•	Samples matched instances and queries GPT-5.1 to obtain LLM-based substitute predictions  
+
 ### Likelihood-based Scoring
 
 To compute **likelihood-based validation scores** for the predicted substitute skills, run:
