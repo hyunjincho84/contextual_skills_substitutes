@@ -41,7 +41,7 @@ After training is complete, generate predictions from **all models** by running:
 ./command/pred_all.sh
 ```
 
-Specifically, this script:
+Specifically, this script:  
 	•	Runs masked-skill inference using the fine-tuned BERT model  
 	•	Generates similarity-based substitutes using Skill2Vec  
 	•	Computes substitutes from conditional probability baselines  
@@ -78,6 +78,7 @@ This script performs the following steps:
 	•	Merges trend signals with likelihood-based validation scores  
 	•	Computes margin values that quantify real-world exposure gain of substitute skills  
 	•	Generates a final dataset for downstream statistical analysis and visualization  
+	
 **Required input files:**
 - `counts_by_pair.csv`  
   A file containing co-occurrence counts of `(truth, substitute, year_month)` skill pairs extracted from model predictions.  
