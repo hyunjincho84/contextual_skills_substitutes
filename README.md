@@ -13,7 +13,13 @@ We aim to quantify how **skills can substitute each other depending on the occup
 ### Create a virtual environment
 
 All required dependencies are listed in `./requirements.txt`.  
-You can use either **conda** or **Python venv**.
+You can use either **conda** or **Python venv**.  
+
+Before using commands, go to `./commands`and add exacution by running
+
+```bash
+chmod +x * 
+```
 
 ## Training
 
@@ -24,7 +30,7 @@ After activating the virtual environment, run the following command to train all
 ```bash
  ./command/train_three_models.sh
 ```
-## Prediction
+## Test
 
 ### Run predictions for all models (BERT, Skill2vec, conditional probability, GPT-5.1)
 
@@ -52,6 +58,27 @@ After computing likelihood-based scores, run the following script to **extract f
 ```bash
 ./command/find_substitutes.sh
 ```
+
+### Exposure gain (margin) analysis with Google Trends
+
+To compute **exposure gain margins** by combining Google Trends signals with model-based likelihood scores, run:
+
+```bash
+./command/get_margin.sh
+```
+This script performs the following steps:  
+	•	Fetches monthly Google Trends data for (truth, substitute) skill pairs  
+	•	Merges trend signals with likelihood-based validation scores  
+	•	Computes margin values that quantify real-world exposure gain of substitute skills  
+	•	Generates a final dataset for downstream statistical analysis and visualization  
+**Required input files:**
+- `counts_by_pair.csv`  
+  A file containing co-occurrence counts of `(truth, substitute, year_month)` skill pairs extracted from model predictions.  
+  This file determines which skill pairs are queried from Google Trends.
+
+- `sample_1000_scored.csv`  
+  A scored sample of predicted skill substitutions with likelihood-based validation scores  
+  (e.g., `sv_loss_from_norm`), used to compute exposure gain margins.
 
 ### SAE-based representation analysis
 
