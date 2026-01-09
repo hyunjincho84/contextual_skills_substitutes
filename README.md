@@ -15,10 +15,11 @@ We aim to quantify how **skills can substitute each other depending on the occup
 All required dependencies are listed in `./requirements.txt`.  
 You can use either **conda** or **Python venv**.  
 
-Before using commands, go to `./commands`and add exacution by running
+Before running any commands, navigate to the `./commands` directory and make all scripts executable:
 
 ```bash
-chmod +x * 
+cd commands
+chmod +x *
 ```
 
 ## Training
