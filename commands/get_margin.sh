@@ -42,13 +42,13 @@ mkdir -p "${GRAPH_OUT_DIR}"
 # ============================================================
 # [1/3] Fetch Google Trends
 # ============================================================
-# section "[1/3] Fetch Google Trends"
-# ts "Running get_trend.py"
+section "[1/3] Fetch Google Trends"
+ts "Running get_trend.py"
 
-# $PYTHON_BIN ../exposure_gain/get_trend.py \
-#   --in-csv "${COUNTS_BY_PAIR}" \
-#   --out-csv "${TRENDS_OUT}" \
-#   --geo US
+$PYTHON_BIN ../exposure_gain/get_trend.py \
+  --in-csv "${COUNTS_BY_PAIR}" \
+  --out-csv "${TRENDS_OUT}" \
+  --geo US
 
 # ts "Saved trends -> ${TRENDS_OUT} (+ .partial if interrupted)"
 
