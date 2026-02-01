@@ -2,10 +2,16 @@
 set -euo pipefail
 
 # ============================================================
-# Trend-based Analysis Pipeline
-#  1) Fetch Google Trends (get_trend.py)
-#  2) Aggregate margin scores (get_margin / aggregate.py)
-#  3) Visualize results (get_graph.py)
+# Posting-level Trend-based Exposure Gain Pipeline (2025)
+#
+#  1) Build (truth, subs, year_month, count)
+#     - get_count_by_pair.py
+#
+#  2) Fetch Google Trends (monthly, Jan–Jun 2025)
+#     - get_trend.py
+#
+#  3) Compute posting-level margin & visualize
+#     - get_graph.py
 # ============================================================
 
 BLUE="\033[1;34m"
@@ -28,57 +34,64 @@ trap 'echo -e "${RED}✗ Failed at line $LINENO${RESET}"' ERR
 
 PYTHON_BIN="python3"
 
-# ----------------------------
-# Paths (adjust if needed)
-# ----------------------------
-COUNTS_BY_PAIR="../exposure_gain/counts_by_pair.csv"
-TRENDS_OUT="../exposure_gain/counts_by_pair_with_trends_monthly.csv"
-SAMPLE_SCORED="../exposure_gain/sample_1000_scored.csv"
-MERGED_OUT="../exposure_gain/sample_1000_scored_with_trends.csv"
-GRAPH_OUT_DIR="../exposure_gain/trend_graphs"
+# ============================================================
+# Paths (EDIT IF NEEDED)
+# ============================================================
 
-mkdir -p "${GRAPH_OUT_DIR}"
+# [1] Prediction → counts_by_pair
+PRED_DIR="/home/jovyan/LEM_data2/hyunjincho/bert_pred/pred/2025"
+COUNTS_BY_PAIR="/home/jovyan/LEM_data2/hyunjincho/margin/counts_by_pair_2025.csv"
+
+# [2] Google Trends
+TRENDS_OUT="./counts_by_pair_with_trends_monthly.csv"
+
+# [3] Posting-level analysis & graph
+PRED_DIR_NEW="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/2025"
+PREPROCESSED_ROOT="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test/2025"
+OUT_FIG="./posting_margin_ratio_hist_2025.png"
 
 # ============================================================
-# [1/3] Fetch Google Trends
+# [1/3] Build (truth, subs, year_month, count)
 # ============================================================
-section "[1/3] Fetch Google Trends"
+section "[1/3] Build counts_by_pair (from predictions)"
+ts "Running get_count_by_pair.py"
+
+$PYTHON_BIN get_count_by_pair.py \
+  --pred-dir "${PRED_DIR}" \
+  --out-csv "${COUNTS_BY_PAIR}"
+
+ts "Saved counts_by_pair -> ${COUNTS_BY_PAIR}"
+
+# ============================================================
+# [2/3] Fetch Google Trends
+# ============================================================
+section "[2/3] Fetch Google Trends (monthly)"
 ts "Running get_trend.py"
 
-$PYTHON_BIN ../exposure_gain/get_trend.py \
+$PYTHON_BIN get_trend.py \
   --in-csv "${COUNTS_BY_PAIR}" \
   --out-csv "${TRENDS_OUT}" \
   --geo US
 
-# ts "Saved trends -> ${TRENDS_OUT} (+ .partial if interrupted)"
+ts "Saved trends -> ${TRENDS_OUT} (+ .partial if interrupted)"
 
 # ============================================================
-# [2/3] Aggregate margin scores
+# [3/3] Posting-level margin & visualization
 # ============================================================
-section "[2/3] Aggregate trend margin"
-ts "Running get_margin (aggregate.py)"
-
-$PYTHON_BIN ../exposure_gain/get_margin.py \
-  --partial "${TRENDS_OUT}.partial" \
-  --sample "${SAMPLE_SCORED}" \
-  --out "${MERGED_OUT}"
-
-ts "Saved merged results -> ${MERGED_OUT}"
-
-# ============================================================
-# [3/3] Plot graphs
-# ============================================================
-section "[3/3] Plot trend graphs"
+section "[3/3] Posting-level margin analysis & graph"
 ts "Running get_graph.py"
 
-$PYTHON_BIN ../exposure_gain/get_graph.py \
-  --in-csv "${MERGED_OUT}" \
-  --out-dir "${GRAPH_OUT_DIR}"
+$PYTHON_BIN get_graph.py \
+  --pred-dir "${PRED_DIR_NEW}" \
+  --preprocessed-root "${PREPROCESSED_ROOT}" \
+  --margin-csv "${TRENDS_OUT}" \
+  --drop-bidirectional \
+  --out-fig "${OUT_FIG}"
 
-ts "Saved graphs -> ${GRAPH_OUT_DIR}"
+ts "Saved histogram -> ${OUT_FIG}"
 
 # ============================================================
 # DONE
 # ============================================================
 section "DONE"
-ts "Trend-based analysis pipeline completed successfully"
+ts "Posting-level trend-based exposure gain pipeline completed successfully"
