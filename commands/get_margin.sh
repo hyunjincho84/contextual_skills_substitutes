@@ -4,18 +4,15 @@ set -euo pipefail
 # ============================================================
 # Posting-level Trend-based Exposure Gain Pipeline (2025)
 #
-#  1) Build (truth, subs, year_month, count)
-#     - get_count_by_pair.py
+# Runs from:
+#   /home/jovyan/LEM_data2/hyunjincho/git/contextual_skills_substitutes/exposure_gain
 #
-#  2) Fetch Google Trends (monthly, Jan–Jun 2025)
-#     - get_trend.py
-#
-#  3) Compute posting-level margin & visualize
-#     - get_graph.py
+#  1) Build (truth, subs, year_month, count): get_count_by_pair.py
+#  2) Fetch Google Trends (monthly):          get_trend.py
+#  3) Posting-level margin + histogram:      get_graph.py
 # ============================================================
 
 BLUE="\033[1;34m"
-GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
 RED="\033[1;31m"
 RESET="\033[0m"
@@ -35,45 +32,52 @@ trap 'echo -e "${RED}✗ Failed at line $LINENO${RESET}"' ERR
 PYTHON_BIN="python3"
 
 # ============================================================
-# Paths (EDIT IF NEEDED)
+# Where the .py scripts live
+# ============================================================
+EXPOSURE_DIR="/home/jovyan/LEM_data2/hyunjincho/git/contextual_skills_substitutes/exposure_gain"
+
+cd "${EXPOSURE_DIR}"
+
+# ============================================================
+# Input / Output Paths
 # ============================================================
 
 # [1] Prediction → counts_by_pair
-PRED_DIR="/home/jovyan/LEM_data2/hyunjincho/bert_pred/pred/2025"
+PRED_DIR="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/2025"
 COUNTS_BY_PAIR="/home/jovyan/LEM_data2/hyunjincho/margin/counts_by_pair_2025.csv"
 
-# [2] Google Trends
-TRENDS_OUT="./counts_by_pair_with_trends_monthly.csv"
+# [2] Google Trends output (written into EXPOSURE_DIR unless you change it)
+TRENDS_OUT="${EXPOSURE_DIR}/counts_by_pair_with_trends_monthly.csv"
 
-# [3] Posting-level analysis & graph
+# [3] Posting-level analysis inputs + output figure
 PRED_DIR_NEW="/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/2025"
 PREPROCESSED_ROOT="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test/2025"
-OUT_FIG="./posting_margin_ratio_hist_2025.png"
+OUT_FIG="${EXPOSURE_DIR}/posting_margin_ratio_hist_2025.png"
 
 # ============================================================
-# [1/3] Build (truth, subs, year_month, count)
+# [1/3] Build counts_by_pair_2025.csv
 # ============================================================
-section "[1/3] Build counts_by_pair (from predictions)"
-ts "Running get_count_by_pair.py"
+# section "[1/3] Build counts_by_pair (from predictions)"
+# ts "Running get_count_by_pair.py"
 
-$PYTHON_BIN get_count_by_pair.py \
-  --pred-dir "${PRED_DIR}" \
-  --out-csv "${COUNTS_BY_PAIR}"
+# $PYTHON_BIN get_count_by_pair.py \
+#   --pred-dir "${PRED_DIR}" \
+#   --out-csv "${COUNTS_BY_PAIR}"
 
-ts "Saved counts_by_pair -> ${COUNTS_BY_PAIR}"
+# ts "Saved counts_by_pair -> ${COUNTS_BY_PAIR}"
 
 # ============================================================
-# [2/3] Fetch Google Trends
+# [2/3] Fetch Google Trends (monthly)
 # ============================================================
-section "[2/3] Fetch Google Trends (monthly)"
-ts "Running get_trend.py"
+# section "[2/3] Fetch Google Trends (monthly)"
+# ts "Running get_trend.py"
 
-$PYTHON_BIN get_trend.py \
-  --in-csv "${COUNTS_BY_PAIR}" \
-  --out-csv "${TRENDS_OUT}" \
-  --geo US
+# $PYTHON_BIN get_trend.py \
+#   --in-csv "${COUNTS_BY_PAIR}" \
+#   --out-csv "${TRENDS_OUT}" \
+#   --geo US
 
-ts "Saved trends -> ${TRENDS_OUT} (+ .partial if interrupted)"
+# ts "Saved trends -> ${TRENDS_OUT} (+ .partial if interrupted)"
 
 # ============================================================
 # [3/3] Posting-level margin & visualization
@@ -90,8 +94,5 @@ $PYTHON_BIN get_graph.py \
 
 ts "Saved histogram -> ${OUT_FIG}"
 
-# ============================================================
-# DONE
-# ============================================================
 section "DONE"
-ts "Posting-level trend-based exposure gain pipeline completed successfully"
+ts "Pipeline completed successfully"
