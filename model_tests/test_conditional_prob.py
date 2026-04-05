@@ -43,14 +43,14 @@ def normalize_for_dataset(s: str) -> str:
 def iter_test_files(root: str):
     # preprocessed_YYYY-MM.csv(.gz)
     files = []
-    files += glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv.gz"))
-    files += glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv"))
+    files += glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*_soc.csv.gz"))
+    files += glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*_soc.csv"))
     for fp in sorted(set(files)):
         yield fp
 
 def extract_year_month(path: str):
     # filenames like: preprocessed_2010-01.csv[.gz]
-    m = re.search(r"preprocessed_(20\d{2})-(\d{2})\.csv(?:\.gz)?$", os.path.basename(path))
+    m = re.search(r"preprocessed_(20\d{2})-(\d{2})_soc\.csv(?:\.gz)?$", os.path.basename(path))
     if not m:
         y = re.search(r"/(20\d{2})/", path)
         return (y.group(1) if y else "unknown", None)

@@ -49,14 +49,14 @@ def from_w2v_key(key: str) -> str:
     return key.replace("_", " ")
 
 def iter_test_files(root: str):
-    pattern1 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv.gz"))
-    pattern2 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*.csv"))
+    pattern1 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*_soc.csv.gz"))
+    pattern2 = glob.glob(os.path.join(root, "[0-9]"*4, "preprocessed_*_soc.csv"))
     files = sorted(list(set(pattern1 + pattern2)))
     for fp in files:
         yield fp
 
 def extract_year_month(path: str):
-    m = re.search(r"preprocessed_(20\d{2})-(\d{2})\.csv(?:\.gz)?$", os.path.basename(path))
+    m = re.search(r"preprocessed_(20\d{2})-(\d{2})_soc\.csv(?:\.gz)?$", os.path.basename(path))
     if not m:
         y = re.search(r"/(20\d{2})/", path)
         return (y.group(1) if y else "unknown", None)

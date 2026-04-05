@@ -28,7 +28,7 @@ DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 OUT_DIR          = "/home/jovyan/LEM_data2/hyunjincho/bert_pred_new"
 PRED_FLUSH_EVERY = 100_000
 
-MONTH_RE = re.compile(r"preprocessed_(20\d{2})-(\d{2})\.csv\.gz$")
+MONTH_RE = re.compile(r"preprocessed_(20\d{2})-(\d{2})_soc\.csv\.gz$")
 
 def extract_year_month(path: str):
     m = MONTH_RE.search(os.path.basename(path))
@@ -70,10 +70,6 @@ class MaskedSkillDataset(Dataset):
             if len(sub) == 0:
                 continue
 
-            # make row_idx int-like (optional but nice)
-            # (row_idx가 NaN일 수도 있으면, 아래 줄을 쓰지 말고 그냥 그대로 저장하세요)
-            # sub["row_idx"] = sub["row_idx"].astype(int)
-
             for ms, ts, ridx, soc2 in zip(
                 sub["masked_sentence"].tolist(),
                 sub["true_skill"].tolist(),
@@ -87,7 +83,7 @@ class MaskedSkillDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
-    
+
 def make_collate_fn(tokenizer):
     def collate_fn(batch):
         if not batch:
@@ -103,7 +99,7 @@ def make_collate_fn(tokenizer):
         mask_positions = (input_ids == mask_id)
         mask_idx = torch.argmax(mask_positions.int(), dim=1)
         labels = torch.tensor(labels, dtype=torch.long)
-        return (input_ids, attn_mask, mask_idx, labels, list(raw_sentences), list(row_idxs),list(soc_2_names))
+        return (input_ids, attn_mask, mask_idx, labels, list(raw_sentences), list(row_idxs), list(soc_2_names))
     return collate_fn
 
 # ─── Evaluate ─────────────────────────────────────────────
@@ -119,7 +115,7 @@ def evaluate():
     model.load_state_dict(state, strict=True)
     model.eval()
 
-    test_files = sorted(glob.glob(os.path.join(TEST_DIR, "[0-9]"*4, "preprocessed_*.csv.gz")))
+    test_files = sorted(glob.glob(os.path.join(TEST_DIR, "[0-9]"*4, "preprocessed_*_soc.csv.gz")))
     if not test_files:
         raise FileNotFoundError(f"No test files found under {TEST_DIR}")
 
@@ -162,30 +158,29 @@ def evaluate():
 
                 logits = model(input_ids, attn_mask, mask_idx)
                 probs  = F.softmax(logits, dim=-1)
-                top5 = torch.topk(probs, k=5, dim=-1)
-                top5_idx = top5.indices
-                top5_p   = top5.values
 
-                eq = (top5_idx == labels.unsqueeze(1))  # (B, 5)
+                top10 = torch.topk(probs, k=10, dim=-1)
+                top10_idx = top10.indices
+                top10_p   = top10.values
+
+                eq = (top10_idx == labels.unsqueeze(1))  # (B, 10)
 
                 top1_correct += eq[:, :1].any(dim=1).sum().item()
                 top3_correct += eq[:, :3].any(dim=1).sum().item()
                 top5_correct += eq[:, :5].any(dim=1).sum().item()
                 total += labels.size(0)
 
-
-                top5_idx_cpu = top5_idx.detach().cpu()
-                top5_p_cpu   = top5_p.detach().cpu()
-                labels_cpu   = labels.detach().cpu()
+                top10_idx_cpu = top10_idx.detach().cpu()
+                top10_p_cpu   = top10_p.detach().cpu()
+                labels_cpu    = labels.detach().cpu()
 
                 for i in range(labels.size(0)):
                     truth_idx = int(labels_cpu[i].item())
                     truth = idx2skill[truth_idx]
 
-                    preds_idx_i = [int(x) for x in top5_idx_cpu[i].tolist()]
+                    preds_idx_i = [int(x) for x in top10_idx_cpu[i].tolist()]
                     preds_names = [idx2skill[j] for j in preds_idx_i]
-
-                    probs_i = [float(x) for x in top5_p_cpu[i].tolist()]
+                    probs_i = [float(x) for x in top10_p_cpu[i].tolist()]
 
                     pred_buffer.append({
                         "year": year,
@@ -196,8 +191,8 @@ def evaluate():
 
                         "truth": truth,
                         "pred_top1": preds_names[0],
-                        "pred_top5": "|".join(preds_names),
-                        "pred_top5_probs": "|".join([f"{p:.6f}" for p in probs_i]),
+                        "pred_top10": "|".join(preds_names),
+                        "pred_top10_probs": "|".join([f"{p:.6f}" for p in probs_i]),
 
                         "masked_sentence": raw_sentences[i],
                     })
