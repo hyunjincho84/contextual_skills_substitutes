@@ -20,7 +20,7 @@ What it does
 
 Outputs
 -------
-/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/
+${BASE_DATA_DIR}/preprocessed_www_new/ (default: /home/jovyan/LEM_data2/data/preprocessed_www_new/)
   ├─ train/{year}/preprocessed_{yyyy-mm}.csv.gz
   ├─ test/{year}/preprocessed_{yyyy-mm}.csv.gz
   └─ findings/{year}/preprocessed_{yyyy-mm}.csv.gz
@@ -47,13 +47,14 @@ from tqdm import tqdm
 from transformers import BertTokenizer
 
 # ─── Config ─────────────────────────────
-INPUT_ROOT     = "/home/jovyan/LEM_data/us/csv/fortnightly/all/20250607"   # year/month root
-OUTPUT_ROOT    = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/"
+BASE_DATA_DIR  = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+INPUT_ROOT     = os.environ.get("RAW_INPUT_ROOT", "/home/jovyan/LEM_data/us/csv/fortnightly/all/20250607")   # year/month root
+OUTPUT_ROOT    = os.environ.get("PREPROCESSED_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
 GLOBAL_LOG     = os.path.join(OUTPUT_ROOT, "preprocess_global_log.txt")
 VOCAB_OUTPUT   = os.path.join(OUTPUT_ROOT, "skill2idx.json")
 
-IT_SKILLS_FILE = "./target_skills.csv"   # column 'skill' (or first column)
-USED_FILES_CSV = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/used_files.csv"
+IT_SKILLS_FILE = os.environ.get("TARGET_SKILLS_CSV", "./target_skills.csv")   # column 'skill' (or first column)
+USED_FILES_CSV = os.environ.get("USED_FILES_CSV", "/home/jovyan/LEM_data2/data/bert_pretrained/used_files.csv")
 
 TRAIN_SAMPLE_FRAC = 0.10   # 10% of unused per month → train
 TEST_SAMPLE_FRAC  = 0.10   # 10% of (unused - train) per month → test
@@ -101,8 +102,14 @@ print(f"✅ Loaded {len(IT_SKILL_SET):,} IT skills from {IT_SKILLS_FILE}")
 
 # ─── used_files.csv ─────────────────────
 def load_used_files(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype=str)
     required = ["year", "month", "snapshot_dir", "file_path"]
+    if not os.path.exists(path):
+        print(f"[WARN] used_files.csv not found: {path}. Continuing with no excluded pretraining files.")
+        df = pd.DataFrame(columns=required)
+        df["yyyy_mm"] = pd.Series(dtype=str)
+        return df
+
+    df = pd.read_csv(path, dtype=str)
     for c in required:
         if c not in df.columns:
             raise ValueError(f"used_files.csv missing column: '{c}'")
@@ -252,6 +259,7 @@ def preprocess_rows(df_subset: pd.DataFrame, file_path: str) -> List[dict]:
                     "onet_name": row.get("onet_name", np.nan),
                     "lot_v7_occupation_name": row.get("lot_v7_occupation_name", np.nan),
                     "lot_v7_specialized_occupation_name": row.get("lot_v7_specialized_occupation_name", np.nan),
+                    "soc_2_name": row.get("soc_2_name", np.nan),
                     "file_path": file_path,
                 })
 

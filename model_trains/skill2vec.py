@@ -23,9 +23,11 @@ from gensim.models import Word2Vec
 from gensim.models.keyedvectors import KeyedVectors
 
 # ========================= Config =========================
-TRAIN_INDEX_CSV   = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/sampled_files_train.csv"
+BASE_DATA_DIR     = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DATA_ROOT         = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
+TRAIN_INDEX_CSV   = os.environ.get("TRAIN_INDEX_CSV", os.path.join(DATA_ROOT, "sampled_files_train.csv"))
 SKILL_COL         = "skills_name"
-TARGET_SKILLS_CSV = "./target_skills.csv"  # must contain column 'NAME'
+TARGET_SKILLS_CSV = os.environ.get("TARGET_SKILLS_CSV", "./target_skills.csv")  # must contain column 'NAME'
 CHUNKSIZE         = 200_000
 
 # Token normalization
@@ -43,7 +45,7 @@ EPOCHS       = 5
 WORKERS      = max(1, os.cpu_count() - 1)
 
 # Output
-OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_new"
+OUT_DIR    = os.environ.get("SKILL2VEC_DIR", os.path.join(BASE_DATA_DIR, "skill2vec_new"))
 MODEL_NAME = f"skill2vec_norm_sg{SG}_d{VECTOR_SIZE}_win{WINDOW}_neg{NEGATIVE}_ep{EPOCHS}"
 MODEL_PATH = os.path.join(OUT_DIR, f"{MODEL_NAME}.model")
 KV_PATH    = os.path.join(OUT_DIR, f"{MODEL_NAME}.kv")

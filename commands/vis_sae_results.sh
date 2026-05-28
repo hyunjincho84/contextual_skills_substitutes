@@ -1,6 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ============================================================
+# SPARSE AUTOENCODER VISUALIZATION PIPELINE
+#
+# Purpose:
+#  - Build SAE-based UMAP and similarity visualizations by industry and year.
+#
+# Runs:
+#  1) sparse_auto_encoder/industry/umap_cluster_sim_industry.py
+#     - Extracts SAE representations and computes industry UMAP/similarity data.
+#  2) sparse_auto_encoder/vis_umap.py
+#     - Replots industry UMAP and legend.
+#  3) sparse_auto_encoder/vis_cluster_sim_graph.py
+#     - Plots industry similarity curves.
+#  4) sparse_auto_encoder/yearly/umap_cluster_sim_yearly.py
+#     - Extracts SAE representations and computes yearly UMAP/similarity data.
+#  5) sparse_auto_encoder/vis_umap.py
+#     - Replots yearly UMAP and colorbar.
+#  6) sparse_auto_encoder/vis_cluster_sim_graph.py
+#     - Plots yearly similarity curves.
+#
+# Input:
+#  - TEST_PATTERN:      ${BASE_DATA_DIR}/preprocessed_www_new/test/20*/preprocessed_*.csv.gz
+#  - YEAR_TEST_PATTERN: ${BASE_DATA_DIR}/preprocessed_www_new/test/20*/preprocessed_*.csv.gz
+#  - MODEL_NAME:        ${BASE_DATA_DIR}/bert_pretrained
+#  - VOCAB_PATH:        ${BASE_DATA_DIR}/preprocessed_www_new/skill2idx.json
+#  - BEST_MODEL_PT:     ${BASE_DATA_DIR}/checkpoints(www)_new/best_model.pt
+#  - SAE_ROOT:          ${BASE_DATA_DIR}/sae_layerwise_out_8192
+#
+# Output:
+#  - Industry outputs: ${BASE_DATA_DIR}/sparse_auto_encoder/python_industry
+#  - Yearly outputs:   ${BASE_DATA_DIR}/sparse_auto_encoder/python_yearly
+#  - UMAP CSV/PNGs, legends/colorbars, feature parquet files, and similarity plots.
+# ============================================================
+
 BLUE="\033[1;34m"
 GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
@@ -16,15 +53,18 @@ step () { echo -e "${GREEN}➤ $1${RESET}"; }
 
 ts () { echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')]${RESET} $1"; }
 
-PYTHON_BIN="python3"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+BASE_DATA_DIR="${BASE_DATA_DIR:-/home/jovyan/LEM_data2/data}"
+export BASE_DATA_DIR
+cd "${REPO_ROOT}"
 
-OUT_DIR="../sparse_auto_encoder/python_industry"
-TEST_PATTERN="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test/20*/preprocessed_*soc.csv.gz"
-MODEL_NAME="/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687"
-VOCAB_PATH="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/skill2idx.json"
-BEST_MODEL_PT="/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new/best_model.pt"
-SAE_ROOT="/home/jovyan/LEM_data2/hyunjincho/sae_layerwise_out"
-TARGET_SKILL="python"
+OUT_DIR="${OUT_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry}"
+TEST_PATTERN="${TEST_PATTERN:-${BASE_DATA_DIR}/preprocessed_www_new/test/20*/preprocessed_*.csv.gz}"
+MODEL_NAME="${MODEL_NAME:-${BASE_DATA_DIR}/bert_pretrained}"
+VOCAB_PATH="${VOCAB_PATH:-${BASE_DATA_DIR}/preprocessed_www_new/skill2idx.json}"
+BEST_MODEL_PT="${BEST_MODEL_PT:-${BASE_DATA_DIR}/checkpoints(www)_new/best_model.pt}"
+SAE_ROOT="${SAE_ROOT:-${BASE_DATA_DIR}/sae_layerwise_out_8192}"
+TARGET_SKILL="${TARGET_SKILL:-python}"
 FIELD_COL="soc_2_name"
 FIELD_VALUES=(
   "Computer and Mathematical Occupations"
@@ -34,8 +74,8 @@ FIELD_VALUES=(
   "Educational Instruction and Library Occupations"
 )
 
-YEAR_OUT_DIR="../sparse_auto_encoder/python_yearly"
-YEAR_TEST_PATTERN="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test/20*/preprocessed_*soc.csv.gz"
+YEAR_OUT_DIR="${YEAR_OUT_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_yearly}"
+YEAR_TEST_PATTERN="${YEAR_TEST_PATTERN:-${BASE_DATA_DIR}/preprocessed_www_new/test/20*/preprocessed_*.csv.gz}"
 YEAR_PER_GROUP=500
 YEAR_CMAP="viridis"
 
@@ -44,7 +84,7 @@ ts "Target skill = ${TARGET_SKILL}"
 
 section "1/2 Industry SOC grouping"
 step "Run umap_cluster_sim_industry.py"
-$PYTHON_BIN ../sparse_auto_encoder/industry/umap_cluster_sim_industry.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/umap_cluster_sim_industry.py" \
   --repr sae \
   --test-pattern "${TEST_PATTERN}" \
   --target-skill "${TARGET_SKILL}" \
@@ -59,7 +99,7 @@ $PYTHON_BIN ../sparse_auto_encoder/industry/umap_cluster_sim_industry.py \
   --out-dir "${OUT_DIR}"
 
 step "Replot UMAP by field"
-$PYTHON_BIN ../sparse_auto_encoder/vis_umap.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/vis_umap.py" \
   --umap-csv "${OUT_DIR}/umap_2d.csv" \
   --out-png  "${OUT_DIR}/umap_layer_grid_replot.png" \
   --legend-out-png "${OUT_DIR}/umap_legend.png" \
@@ -68,7 +108,7 @@ $PYTHON_BIN ../sparse_auto_encoder/vis_umap.py \
   --legend-fontsize 26
 
 step "Plot similarity curve"
-$PYTHON_BIN ../sparse_auto_encoder/vis_cluster_sim_graph.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/vis_cluster_sim_graph.py" \
   --in-dir "${OUT_DIR}" \
   --font-size 18 \
   --legend-out-png "${OUT_DIR}/element_centric_similarity_legend.png" \
@@ -78,7 +118,7 @@ $PYTHON_BIN ../sparse_auto_encoder/vis_cluster_sim_graph.py \
 
 section "2/2 Yearly grouping"
 step "Run umap_cluster_sim_yearly.py"
-$PYTHON_BIN ../sparse_auto_encoder/yearly/umap_cluster_sim_yearly.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/yearly/umap_cluster_sim_yearly.py" \
   --group-by year \
   --test-pattern "${YEAR_TEST_PATTERN}" \
   --target-skill "${TARGET_SKILL}" \
@@ -92,7 +132,7 @@ $PYTHON_BIN ../sparse_auto_encoder/yearly/umap_cluster_sim_yearly.py \
   --out-dir "${YEAR_OUT_DIR}"
 
 step "Replot UMAP by year + colorbar"
-$PYTHON_BIN ../sparse_auto_encoder/vis_umap.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/vis_umap.py" \
   --umap-csv "${YEAR_OUT_DIR}/umap_2d.csv" \
   --out-png  "${YEAR_OUT_DIR}/umap_layer_grid_year_conti.png" \
   --cbar-out-png "${YEAR_OUT_DIR}/umap_year_colorbar.png" \
@@ -101,7 +141,7 @@ $PYTHON_BIN ../sparse_auto_encoder/vis_umap.py \
   --cmap "${YEAR_CMAP}"
 
 step "Plot similarity curve yearly"
-$PYTHON_BIN ../sparse_auto_encoder/vis_cluster_sim_graph.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/vis_cluster_sim_graph.py" \
   --in-dir "${YEAR_OUT_DIR}" \
   --font-size 18 \
   --legend-out-png "${YEAR_OUT_DIR}/element_centric_similarity_legend.png" \

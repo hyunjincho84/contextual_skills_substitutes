@@ -14,21 +14,22 @@ sys.path.insert(0, MODEL_DIR)
 from model import BERTForSkillPrediction
 
 # ─── Config ───────────────────────────────────────────────
-DATA_ROOT       = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new"
+BASE_DATA_DIR   = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DATA_ROOT       = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
 TEST_DIR        = os.path.join(DATA_ROOT, "test")
 VOCAB_PATH      = os.path.join(DATA_ROOT, "skill2idx.json")
 
-MODEL_NAME    = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687"
-BEST_MODEL_PT = "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new/best_model.pt"
+MODEL_NAME    = os.environ.get("BERT_MODEL_NAME", os.path.join(BASE_DATA_DIR, "bert_pretrained"))
+BEST_MODEL_PT = os.environ.get("BEST_MODEL_PT", os.path.join(BASE_DATA_DIR, "checkpoints(www)_new", "best_model.pt"))
 
 MAX_LEN    = 512
 BATCH_SIZE = 64
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
-OUT_DIR          = "/home/jovyan/LEM_data2/hyunjincho/bert_pred_new"
+OUT_DIR          = os.environ.get("BERT_OUT_DIR", os.path.join(BASE_DATA_DIR, "bert_pred_new"))
 PRED_FLUSH_EVERY = 100_000
 
-MONTH_RE = re.compile(r"preprocessed_(20\d{2})-(\d{2})_soc\.csv\.gz$")
+MONTH_RE = re.compile(r"preprocessed_(20\d{2})-(\d{2})\.csv\.gz$")
 
 def extract_year_month(path: str):
     m = MONTH_RE.search(os.path.basename(path))
@@ -53,11 +54,13 @@ def write_preds_month(year: str, month: int, rows: list):
 # ─── Dataset ─────────────────────────────────────────────
 class MaskedSkillDataset(Dataset):
     def __init__(self, csv_path, skill2idx, chunksize=200_000):
-        self.samples = []  # (masked_sentence, label, raw_sentence, row_idx, soc_2_name)
+        self.samples = []  # (masked_sentence, label, raw_sentence, row_idx, soc_2_name, file_path)
 
         req_cols = ["masked_sentence", "true_skill", "row_idx", "soc_2_name"]
+        header = pd.read_csv(csv_path, nrows=0, compression="gzip")
+        usecols = req_cols + (["file_path"] if "file_path" in header.columns else [])
 
-        for chunk in pd.read_csv(csv_path, usecols=req_cols, chunksize=chunksize, compression="gzip"):
+        for chunk in pd.read_csv(csv_path, usecols=usecols, chunksize=chunksize, compression="gzip"):
             if len(chunk) == 0:
                 continue
 
@@ -70,13 +73,20 @@ class MaskedSkillDataset(Dataset):
             if len(sub) == 0:
                 continue
 
-            for ms, ts, ridx, soc2 in zip(
+            # make row_idx int-like (optional but nice)
+            # (row_idx가 NaN일 수도 있으면, 아래 줄을 쓰지 말고 그냥 그대로 저장하세요)
+            # sub["row_idx"] = sub["row_idx"].astype(int)
+
+            file_paths = sub["file_path"].astype(str).tolist() if "file_path" in sub.columns else [""] * len(sub)
+
+            for ms, ts, ridx, soc2, src_fp in zip(
                 sub["masked_sentence"].tolist(),
                 sub["true_skill"].tolist(),
                 sub["row_idx"].tolist(),
                 sub["soc_2_name"].tolist(),
+                file_paths,
             ):
-                self.samples.append((ms, skill2idx[ts], ms, ridx, soc2))
+                self.samples.append((ms, skill2idx[ts], ms, ridx, soc2, src_fp))
 
     def __len__(self):
         return len(self.samples)
@@ -88,7 +98,7 @@ def make_collate_fn(tokenizer):
     def collate_fn(batch):
         if not batch:
             return None
-        sentences, labels, raw_sentences, row_idxs, soc_2_names = zip(*batch)
+        sentences, labels, raw_sentences, row_idxs, soc_2_names, source_file_paths = zip(*batch)
         enc = tokenizer(
             list(sentences), padding=True, truncation=True,
             max_length=MAX_LEN, return_tensors="pt"
@@ -99,11 +109,12 @@ def make_collate_fn(tokenizer):
         mask_positions = (input_ids == mask_id)
         mask_idx = torch.argmax(mask_positions.int(), dim=1)
         labels = torch.tensor(labels, dtype=torch.long)
-        return (input_ids, attn_mask, mask_idx, labels, list(raw_sentences), list(row_idxs), list(soc_2_names))
+        return (input_ids, attn_mask, mask_idx, labels, list(raw_sentences), list(row_idxs), list(soc_2_names), list(source_file_paths))
     return collate_fn
 
 # ─── Evaluate ─────────────────────────────────────────────
 def evaluate():
+    os.makedirs(OUT_DIR, exist_ok=True)
     tokenizer = BertTokenizerFast.from_pretrained(MODEL_NAME)
     with open(VOCAB_PATH, "r", encoding="utf-8") as f:
         skill2idx = json.load(f)
@@ -115,7 +126,7 @@ def evaluate():
     model.load_state_dict(state, strict=True)
     model.eval()
 
-    test_files = sorted(glob.glob(os.path.join(TEST_DIR, "[0-9]"*4, "preprocessed_*_soc.csv.gz")))
+    test_files = sorted(glob.glob(os.path.join(TEST_DIR, "[0-9]"*4, "preprocessed_*.csv.gz")))
     if not test_files:
         raise FileNotFoundError(f"No test files found under {TEST_DIR}")
 
@@ -150,7 +161,7 @@ def evaluate():
                 if batch is None:
                     continue
 
-                input_ids, attn_mask, mask_idx, labels, raw_sentences, row_idx_list, soc_2_name_list = batch
+                input_ids, attn_mask, mask_idx, labels, raw_sentences, row_idx_list, soc_2_name_list, source_file_path_list = batch
                 input_ids = input_ids.to(DEVICE, non_blocking=True)
                 attn_mask = attn_mask.to(DEVICE, non_blocking=True)
                 mask_idx  = mask_idx.to(DEVICE, non_blocking=True)
@@ -159,28 +170,29 @@ def evaluate():
                 logits = model(input_ids, attn_mask, mask_idx)
                 probs  = F.softmax(logits, dim=-1)
 
-                top10 = torch.topk(probs, k=10, dim=-1)
-                top10_idx = top10.indices
-                top10_p   = top10.values
+                top5 = torch.topk(probs, k=5, dim=-1)
+                top5_idx = top5.indices
+                top5_p   = top5.values
 
-                eq = (top10_idx == labels.unsqueeze(1))  # (B, 10)
+                eq = (top5_idx == labels.unsqueeze(1))  # (B, 5)
 
                 top1_correct += eq[:, :1].any(dim=1).sum().item()
                 top3_correct += eq[:, :3].any(dim=1).sum().item()
                 top5_correct += eq[:, :5].any(dim=1).sum().item()
                 total += labels.size(0)
 
-                top10_idx_cpu = top10_idx.detach().cpu()
-                top10_p_cpu   = top10_p.detach().cpu()
-                labels_cpu    = labels.detach().cpu()
+                top5_idx_cpu = top5_idx.detach().cpu()
+                top5_p_cpu   = top5_p.detach().cpu()
+                labels_cpu   = labels.detach().cpu()
 
                 for i in range(labels.size(0)):
                     truth_idx = int(labels_cpu[i].item())
                     truth = idx2skill[truth_idx]
 
-                    preds_idx_i = [int(x) for x in top10_idx_cpu[i].tolist()]
+                    preds_idx_i = [int(x) for x in top5_idx_cpu[i].tolist()]
                     preds_names = [idx2skill[j] for j in preds_idx_i]
-                    probs_i = [float(x) for x in top10_p_cpu[i].tolist()]
+
+                    probs_i = [float(x) for x in top5_p_cpu[i].tolist()]
 
                     pred_buffer.append({
                         "year": year,
@@ -188,11 +200,12 @@ def evaluate():
 
                         "row_idx": row_idx_list[i],
                         "soc_2_name": soc_2_name_list[i],
+                        "file_path": source_file_path_list[i],
 
                         "truth": truth,
                         "pred_top1": preds_names[0],
-                        "pred_top10": "|".join(preds_names),
-                        "pred_top10_probs": "|".join([f"{p:.6f}" for p in probs_i]),
+                        "pred_top5": "|".join(preds_names),
+                        "pred_top5_probs": "|".join([f"{p:.6f}" for p in probs_i]),
 
                         "masked_sentence": raw_sentences[i],
                     })

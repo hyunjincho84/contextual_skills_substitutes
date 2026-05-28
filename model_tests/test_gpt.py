@@ -19,10 +19,9 @@ from tqdm import tqdm
 from openai import OpenAI
 
 # ---------- DEFAULTS ----------
-DEFAULT_IN_PATTERN = (
-    "/home/jovyan/LEM_data2/hyunjincho/gpt_samples/"
-    "20*/gpt_unique_samples_*_global*0.csv.gz"
-)
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+GPT_SAMPLES_DIR = os.environ.get("GPT_SAMPLES_DIR", os.path.join(BASE_DATA_DIR, "gpt_samples"))
+DEFAULT_IN_PATTERN = os.path.join(GPT_SAMPLES_DIR, "20*", "gpt_unique_samples_*_global*0.csv.gz")
 DEFAULT_OUT_SUFFIX = "_with_gpt_pred"  # per-file output suffix (non-test mode)
 
 MAX_RETRIES = 3
@@ -116,7 +115,7 @@ def append_row_to_csv(out_path: str, row_dict: dict, write_header: bool):
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in-pattern", type=str, default=DEFAULT_IN_PATTERN)
-    ap.add_argument("--skill2idx", type=str, default="./skill2idx_org.json")
+    ap.add_argument("--skill2idx", type=str, default=os.path.join(BASE_DATA_DIR, "preprocessed_www_new", "skill2idx.json"))
     ap.add_argument("--model", type=str, default="gpt-5.1")
     ap.add_argument(
         "--num-rows",

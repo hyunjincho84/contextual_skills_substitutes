@@ -192,6 +192,6 @@ if __name__ == "__main__":
     
 """
 python3 get_count_by_pair.py \
-  --pred-dir /home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/2025 \
+  --pred-dir /home/jovyan/LEM_data2/data/bert_pred_new/pred/2025 \
   --out-csv ./counts_by_pair_2025.csv
 """

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Create a reproducible GPT evaluation sample set from BERT prediction outputs.
+Create a reproducible GPT evaluation sample set from BERT sv_summary outputs.
 
 What this script does:
-1) Scan yearly compressed CSV files under `IN_ROOT` that contain at least:
+1) Scan yearly `sv_summary_llama_full_bert_*.csv.gz` files under `IN_ROOT` that contain at least:
    - truth
    - masked_sentence
 2) Build a GLOBAL-unique pool of (truth, masked_sentence) pairs across ALL files/years.
@@ -30,8 +30,9 @@ from typing import Optional, List, Dict
 import pandas as pd
 from tqdm import tqdm
 
-IN_ROOT  = "/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred"
-OUT_ROOT = "/home/jovyan/LEM_data2/gpt_samples"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+IN_ROOT  = os.environ.get("BERT_PRED_DIR", os.path.join(BASE_DATA_DIR, "bert_pred_new", "pred"))
+OUT_ROOT = os.environ.get("GPT_SAMPLES_DIR", os.path.join(BASE_DATA_DIR, "gpt_samples"))
 
 CHUNK_SIZE = 200_000
 KEY_SEP = "|||SEP|||"

@@ -5,7 +5,7 @@
 Compute LLaMA-based SV(sv_llama) for GPT predictions (BATCH over many per-year GPT output files).
 
 Inputs (default):
-  /home/jovyan/LEM_data2/hyunjincho/gpt_samples/20*/*with_gpt_pred*.csv.*
+  /home/jovyan/LEM_data2/data/gpt_samples/20*/*with_gpt_pred*.csv.*
 
 Each input CSV must contain:
   - truth
@@ -48,7 +48,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_float32_matmul_precision("high")
 
 # ---------- DEFAULTS ----------
-DEFAULT_IN_PATTERN = "/home/jovyan/LEM_data2/hyunjincho/gpt_samples/20*/*with_gpt_pred.csv*"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DEFAULT_IN_PATTERN = os.path.join(BASE_DATA_DIR, "gpt_samples", "20*", "*with_gpt_pred.csv*")
 DEFAULT_LLAMA_CKPT = "meta-llama/Llama-3.2-3B"
 
 

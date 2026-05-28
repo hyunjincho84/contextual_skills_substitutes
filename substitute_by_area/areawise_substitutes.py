@@ -32,7 +32,7 @@ Core idea (count-based, post-normalized "most-sub"):
 """
 Usage
 python3 areawise_substitutes.py \
-  --pred-root /home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred \
+  --pred-root /home/jovyan/LEM_data2/data/bert_pred_new/pred \
   --target-skill python \
   --topk-per-soc2 5 \
   --out ./subs_python_by_soc2.csv \

@@ -39,9 +39,10 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ===== CONFIG =====
-DEFAULT_BERT_PRED_DIR         = "/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred"
-DEFAULT_W2V_PRED_DIR          = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_pred_new/pred"
-DEFAULT_COND_PRED_DIR         = "/home/jovyan/LEM_data2/hyunjincho/condprob_pred_new/pred"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DEFAULT_BERT_PRED_DIR         = os.path.join(BASE_DATA_DIR, "bert_pred_new", "pred")
+DEFAULT_W2V_PRED_DIR          = os.path.join(BASE_DATA_DIR, "skill2vec_pred_new", "pred")
+DEFAULT_COND_PRED_DIR         = os.path.join(BASE_DATA_DIR, "condprob_pred_new", "pred")
 
 DEFAULT_LLAMA_CHECKPOINT = "meta-llama/Llama-3.2-3B"
 

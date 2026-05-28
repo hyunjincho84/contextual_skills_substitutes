@@ -14,14 +14,15 @@ from tqdm import tqdm
 from model import BERTForSkillPrediction
 
 # ─── Config ───────────────────────────────────────────────────────────────
-# Training target: preprocessed_www/train/**/preprocessed_YYYY-MM.csv.gz
-DATA_ROOT      = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new"
+# Training target: ${BASE_DATA_DIR}/preprocessed_www_new/train/**/preprocessed_YYYY-MM.csv.gz
+BASE_DATA_DIR  = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DATA_ROOT      = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
 TRAIN_DIR      = os.path.join(DATA_ROOT, "train")
 VOCAB_PATH     = os.path.join(DATA_ROOT, "skill2idx.json")
 
 # model/ckpt
-MODEL_NAME     = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687"
-CKPT_DIR       = "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new"
+MODEL_NAME     = os.environ.get("BERT_MODEL_NAME", os.path.join(BASE_DATA_DIR, "bert_pretrained"))
+CKPT_DIR       = os.environ.get("CKPT_DIR", os.path.join(BASE_DATA_DIR, "checkpoints(www)_new"))
 BEST_MODEL_PT  = os.path.join(CKPT_DIR, "best_model.pt")
 RESUME_FROM    = None  # ex: os.path.join(CKPT_DIR, "epoch_3.pt")
 

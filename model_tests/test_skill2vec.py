@@ -24,9 +24,10 @@ from tqdm import tqdm
 from gensim.models import Word2Vec
 
 # ========== Config ==========
-MODEL_PATH = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_new/skill2vec_norm_sg1_d300_win50_neg10_ep5.model"
-TEST_ROOT  = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test"
-OUT_DIR    = "/home/jovyan/LEM_data2/hyunjincho/skill2vec_pred_new"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+MODEL_PATH = os.environ.get("SKILL2VEC_MODEL_PATH", os.path.join(BASE_DATA_DIR, "skill2vec_new", "skill2vec_norm_sg1_d300_win50_neg10_ep5.model"))
+TEST_ROOT  = os.environ.get("TEST_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new", "test"))
+OUT_DIR    = os.environ.get("SKILL2VEC_OUT_DIR", os.path.join(BASE_DATA_DIR, "skill2vec_pred_new"))
 CHUNKSIZE  = 200_000
 MAX_PRINT_PER_REASON = 10
 TOPK = 5

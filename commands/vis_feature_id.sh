@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # ============================================================
-# Union Mean Activation Heatmap Pipeline
-#  1) Raw union-mean heatmap (top-K, cluster-ordered)
-#  2) Thresholded union-mean heatmap (quantile-based)
+# UNION MEAN ACTIVATION HEATMAP PIPELINE
+#
+# Purpose:
+#  - Visualize important SAE feature IDs across industries using union-mean activation heatmaps.
+#
+# Runs:
+#  1) sparse_auto_encoder/industry/vis_union_mean_activation_heatmap.py
+#     - Builds a raw union-mean activation heatmap.
+#  2) sparse_auto_encoder/industry/vis_union_mean_activation_heatmap_threshold.py
+#     - Builds a quantile-thresholded union-mean activation heatmap.
+#
+# Input:
+#  - FEATURES_PARQUET: ${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/features.parquet
+#  - LAYERS: 1-12
+#  - TOPK: 64
+#  - SAMPLES_PER_INDUSTRY: 250
+#
+# Output:
+#  - OUT_DIR: ${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/feature_id_vis
+#  - Raw and thresholded heatmap PNG/CSV outputs from the visualization scripts.
 # ============================================================
 
 # ---------- helpers ----------
@@ -30,11 +50,12 @@ ts () {
 
 trap 'echo -e "${RED}✗ Failed at line $LINENO${RESET}"' ERR
 
-PYTHON_BIN="python3"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # ---------- paths ----------
-FEATURES_PARQUET="../sparse_auto_encoder/python_industry/features.parquet"
-OUT_DIR="../sparse_auto_encoder/python_industry/feature_id_vis"
+BASE_DATA_DIR="${BASE_DATA_DIR:-/home/jovyan/LEM_data2/data}"
+FEATURES_PARQUET="${FEATURES_PARQUET:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/features.parquet}"
+OUT_DIR="${OUT_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/feature_id_vis}"
 
 # ---------- common params ----------
 LAYERS="1-12"
@@ -51,7 +72,7 @@ COL_ORDER="cluster"
 section "[1/2] Union mean activation heatmap (raw)"
 ts "Running vis_union_mean_activation_heatmap.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/industry/vis_union_mean_activation_heatmap.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/vis_union_mean_activation_heatmap.py" \
   --features-parquet "${FEATURES_PARQUET}" \
   --out-dir "${OUT_DIR}" \
   --layers ${LAYERS} \
@@ -70,7 +91,7 @@ $PYTHON_BIN ../sparse_auto_encoder/industry/vis_union_mean_activation_heatmap.py
 section "[2/2] Union mean activation heatmap (quantile threshold)"
 ts "Running vis_union_mean_activation_heatmap_threshold.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/industry/vis_union_mean_activation_heatmap_threshold.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/vis_union_mean_activation_heatmap_threshold.py" \
   --features-parquet "${FEATURES_PARQUET}" \
   --out-dir "${OUT_DIR}" \
   --layers ${LAYERS} \

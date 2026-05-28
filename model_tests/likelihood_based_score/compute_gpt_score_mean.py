@@ -6,12 +6,12 @@ Compare mean SV between GPT-scored rows vs BERT-scored rows on the SAME sampled 
 and verify (truth, masked_sentence) equality for matched rows.
 
 GPT inputs (default):
-  /home/jovyan/LEM_data2/hyunjincho/gpt_samples/20*/*with_sv_llama.csv.gz
+  /home/jovyan/LEM_data2/data/gpt_samples/20*/*with_sv_llama.csv.gz
   required cols: year, file, row_idx, sv_llama
   optional (for verification): truth, masked_sentence
 
 BERT source (original format):
-  /home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/{year}/<basename(file)>
+  /home/jovyan/LEM_data2/data/bert_pred_new/pred/{year}/<basename(file)>
   - NO row_idx column (row order is the index)
   - score column could be: sv_llama or sv (auto-detect)
   - for verification, expects truth and masked_sentence columns (common in sv_summary files)
@@ -29,8 +29,9 @@ import pandas as pd
 from tqdm import tqdm
 
 
-DEFAULT_GPT_PATTERN = "/home/jovyan/LEM_data2/hyunjincho/gpt_samples/20*/*with_sv_llama.csv.gz"
-DEFAULT_BERT_BASE   = "/home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DEFAULT_GPT_PATTERN = os.path.join(BASE_DATA_DIR, "gpt_samples", "20*", "*with_sv_llama.csv.gz")
+DEFAULT_BERT_BASE   = os.path.join(BASE_DATA_DIR, "bert_pred_new", "pred")
 
 
 def detect_score_col(cols):

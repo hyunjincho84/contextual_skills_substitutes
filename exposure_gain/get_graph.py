@@ -130,9 +130,15 @@ def pick_top_wrong(truth: str, top_list: List[str]) -> Optional[str]:
 
 def attach_posting_ids(pred_block: pd.DataFrame, preprocessed_path: str) -> pd.DataFrame:
     """
-    Attach row_idx/file_path by assuming row-order alignment:
-      pred_block row i corresponds to preprocessed row i.
+    Attach row_idx/file_path. Prefer IDs already saved in prediction files;
+    fall back to row-order alignment for older prediction outputs.
     """
+    if {"row_idx", "file_path"}.issubset(pred_block.columns):
+        out = pred_block.copy()
+        fp = out["file_path"].astype(str).str.strip()
+        if fp.ne("").any() and fp.ne("nan").any():
+            return out
+
     pre = pd.read_csv(
         preprocessed_path,
         compression="gzip" if preprocessed_path.endswith(".gz") else None,
@@ -373,7 +379,7 @@ def main():
     plt.grid(False)
 
     plt.xlabel("Exposure Gain (%)", fontsize=22)
-    plt.ylabel("Posting Count", fontsize=22)
+    plt.ylabel("Count", fontsize=22)
 
     plt.tight_layout()
     ensure_dir(os.path.dirname(os.path.abspath(args.out_fig)))
@@ -391,9 +397,9 @@ if __name__ == "__main__":
     
     
 """
-python3 tmp.py \
-  --pred-dir /home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred/2025 \
-  --preprocessed-root /home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/test/2025 \
+python3 get_graph.py \
+  --pred-dir /home/jovyan/LEM_data2/data/bert_pred_new/pred/2025 \
+  --preprocessed-root /home/jovyan/LEM_data2/data/preprocessed_www_new/test/2025 \
   --margin-csv ./counts_by_pair_with_trends_monthly.csv \
   --drop-bidirectional \
   --out-fig ./posting_margin_ratio_hist_2025.png

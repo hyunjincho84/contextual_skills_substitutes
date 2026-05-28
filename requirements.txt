@@ -28,7 +28,6 @@ certifi==2024.2.2
 cffi==1.16.0
 chardet==4.0.0
 charset-normalizer==3.3.2
-cheetah @ file:///tmp/cheetah-0.4.16-py3-none-any.whl#sha256=84965c6216b19805d90b35b1b0d4771624c4ebe5164d45499f5a11e6cd9b526a
 click==8.0.0
 click-plugins==1.1.1
 cligj==0.7.2

@@ -1,13 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # ============================================================
-# Overlap Analysis Pipeline
-#  1) Industry-wise overlap (single grid heatmap + per-layer CSVs)
-#  2) Industry overlap graph
-#  3) Year-wise overlap (single grid heatmap + per-layer CSVs)
-#  4) Year overlap graph
-#  5) Year overlap diff graph
+# OVERLAP ANALYSIS PIPELINE
+#
+# Purpose:
+#  - Measure and visualize feature overlap across industries and years.
+#
+# Runs:
+#  1) sparse_auto_encoder/industry/overlap_by_industry.py
+#     - Builds industry overlap matrices, per-layer CSVs, and grid heatmap.
+#  2) sparse_auto_encoder/industry/overlap_by_industry_graph.py
+#     - Draws industry overlap graph from per-layer CSVs.
+#  3) sparse_auto_encoder/yearly/overlap_by_year.py
+#     - Builds yearly overlap matrices, per-layer CSVs, and grid heatmap.
+#  4) sparse_auto_encoder/yearly/overlap_by_year_graph.py
+#     - Draws year overlap graph from per-layer CSVs.
+#  5) sparse_auto_encoder/yearly/overlap_by_diff_year_graph.py
+#     - Draws year-over-year overlap difference graph.
+#
+# Input:
+#  - Industry features: ${IND_DIR}/features.parquet
+#  - Yearly features:   ${YEAR_DIR}/features.parquet
+#  - YEARS: 2010-2025
+#
+# Output:
+#  - Industry outputs: ${IND_DIR}/overlaps
+#  - Yearly outputs:   ${YEAR_DIR}/overlaps
+#  - Per-layer CSVs:   overlaps/csvs
+#  - Heatmaps/graphs:  PNG files under each overlaps directory.
 # ============================================================
 
 # ---------- helpers ----------
@@ -28,11 +52,12 @@ ts () { echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')]${RESET} $1"; }
 
 trap 'echo -e "${RED}✗ Failed at line $LINENO${RESET}"' ERR
 
-PYTHON_BIN="python3"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+BASE_DATA_DIR="${BASE_DATA_DIR:-/home/jovyan/LEM_data2/data}"
 
 # ---------- paths ----------
-IND_DIR="../sparse_auto_encoder/python_industry"
-YEAR_DIR="../sparse_auto_encoder/python_yearly"
+IND_DIR="${IND_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry}"
+YEAR_DIR="${YEAR_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_yearly}"
 
 IND_OVERLAP_DIR="${IND_DIR}/overlaps"
 YEAR_OVERLAP_DIR="${YEAR_DIR}/overlaps"
@@ -50,7 +75,7 @@ YEARS="2010-2025"
 section "[1/5] Industry-wise overlap"
 ts "Running overlap_by_industry.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/industry/overlap_by_industry.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/overlap_by_industry.py" \
   --features-parquet "${IND_DIR}/features.parquet" \
   --out-dir "${IND_OVERLAP_DIR}" \
   --topk 128 \
@@ -70,7 +95,7 @@ ts "Per-layer CSVs -> ${IND_CSV_DIR}"
 section "[2/5] Industry overlap graph"
 ts "Running overlap_by_industry_graph.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/industry/overlap_by_industry_graph.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/overlap_by_industry_graph.py" \
   --in-dir "${IND_CSV_DIR}" \
   --out-dir "${IND_OVERLAP_DIR}" \
   --alpha-lines 0.25
@@ -83,7 +108,7 @@ ts "Saved industry overlap graph -> ${IND_OVERLAP_DIR}"
 section "[3/5] Year-wise overlap"
 ts "Running overlap_by_year.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/yearly/overlap_by_year.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/yearly/overlap_by_year.py" \
   --features-parquet "${YEAR_DIR}/features.parquet" \
   --out-dir "${YEAR_OVERLAP_DIR}" \
   --group-by year \
@@ -105,7 +130,7 @@ ts "Per-layer CSVs -> ${YEAR_CSV_DIR}"
 section "[4/5] Year overlap graph"
 ts "Running overlap_by_year_graph.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/yearly/overlap_by_year_graph.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/yearly/overlap_by_year_graph.py" \
   --in-dir "${YEAR_CSV_DIR}" \
   --out-dir "${YEAR_OVERLAP_DIR}" \
   --alpha-lines 0.20
@@ -119,12 +144,12 @@ ts "Saved year overlap graph -> ${YEAR_OVERLAP_DIR}"
 section "[5/5] Year overlap difference graph"
 ts "Running overlap_by_year_diff_graph.py"
 
-$PYTHON_BIN ../sparse_auto_encoder/yearly/overlap_by_diff_year_graph.py \
+"${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/yearly/overlap_by_diff_year_graph.py" \
   --in-dir "${YEAR_CSV_DIR}" \
   --out-png "${YEAR_OVERLAP_DIR}/yearly_diff.png" \
   --layers 1,2,3,4,5,6,7,8,9,10,11,12 \
   --agg mean \
-  --alpha-lines 0.25 \
+  --alpha-lines 0.25
 
 ts "Saved year overlap diff graph -> ${YEAR_OVERLAP_DIR}"
 

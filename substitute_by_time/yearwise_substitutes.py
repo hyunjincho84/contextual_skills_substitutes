@@ -30,8 +30,8 @@ Output CSV columns:
 
 """
 Usage
-python3 yearwise_substoties.py \
-  --pred-root /home/jovyan/LEM_data2/hyunjincho/bert_pred_new/pred \
+python3 yearwise_substitutes.py \
+  --pred-root /home/jovyan/LEM_data2/data/bert_pred_new/pred \
   --target-skill python \
   --out-topk 5 \
   --out ./python_yearwise_top5.csv

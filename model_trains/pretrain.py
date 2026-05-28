@@ -15,9 +15,10 @@ from transformers import (
 from tqdm import tqdm
 
 # ─── 설정 ─────────────────────────────────────────────
-BASE_DIR   = "/home/jovyan/LEM_data/us/csv/fortnightly/all/20250607"  # ✅ Root containing all year/month snapshots
-MODEL_NAME = "bert-base-uncased"
-OUTPUT_DIR = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained"
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+BASE_DIR   = os.environ.get("RAW_INPUT_ROOT", "/home/jovyan/LEM_data/us/csv/fortnightly/all/20250607")  # Root containing all year/month snapshots
+MODEL_NAME = os.environ.get("BERT_BASE_MODEL", "bert-base-uncased")
+OUTPUT_DIR = os.environ.get("BERT_PRETRAIN_DIR", os.path.join(BASE_DATA_DIR, "bert_pretrained"))
 MAX_LEN    = 512
 MLM_PROB   = 0.15
 FILES_PER_MONTH = 1
@@ -161,5 +162,7 @@ trainer = Trainer(
 
 print("🚀 Starting MLM pretraining...")
 trainer.train()
+trainer.save_model(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"✅ Model saved to: {OUTPUT_DIR}")
 print(f"📝 List of used files: {used_files_csv}")

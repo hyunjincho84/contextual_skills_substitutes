@@ -19,10 +19,12 @@ from typing import Optional, Set, Dict
 from tqdm import tqdm
 
 # =================== Config ===================
-TRAIN_INDEX_CSV   = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/sampled_files_train.csv"
+BASE_DATA_DIR     = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DATA_ROOT         = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
+TRAIN_INDEX_CSV   = os.environ.get("TRAIN_INDEX_CSV", os.path.join(DATA_ROOT, "sampled_files_train.csv"))
 SKILL_COL         = "skills_name"
-TARGET_SKILLS_CSV = "./target_skills.csv"
-OUT_DIR           = "/home/jovyan/LEM_data2/hyunjincho/condprob_new"
+TARGET_SKILLS_CSV = os.environ.get("TARGET_SKILLS_CSV", "./target_skills.csv")
+OUT_DIR           = os.environ.get("CONDPROB_DIR", os.path.join(BASE_DATA_DIR, "condprob_new"))
 CHUNKSIZE         = 200_000
 
 LOWERCASE         = True

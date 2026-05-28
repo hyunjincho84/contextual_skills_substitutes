@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, glob, json, random, argparse
+import os, re, glob, json, random, argparse, sys
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -12,6 +12,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertTokenizer
 from tqdm import tqdm
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "model_trains"))
+sys.path.insert(0, MODEL_DIR)
 
 from model import BERTForSkillPrediction
 
@@ -339,7 +343,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--test-pattern", type=str,
-                    default="/home/jovyan/LEM_data2/hyunjincho/preprocessed_www/test/20*/preprocessed_*csv.gz")
+                    default=os.path.join(os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data"), "preprocessed_www_new", "test", "20*", "preprocessed_*csv.gz"))
     ap.add_argument("--truth-col", type=str, default="true_skill")
     ap.add_argument("--text-col", type=str, default="masked_sentence")
 
@@ -524,15 +528,15 @@ if __name__ == "__main__":
 """
 python3 vis_umap_cluster_sim_industry.py \
   --repr sae \
-  --test-pattern "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/t*/20*/preprocessed_*soc.csv.gz" \
+  --test-pattern "/home/jovyan/LEM_data2/data/preprocessed_www_new/t*/20*/preprocessed_*.csv.gz" \
   --target-skill "python" \
   --field-col soc_2_name \
   --field-values "Computer and Mathematical Occupations" "Business and Financial Operations Occupations" "Management Occupations" "Sales and Related Occupations" "Educational Instruction and Library Occupations" \
   --per-field 250 \
-  --model-name /home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687 \
-  --vocab-path /home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new/skill2idx.json \
-  --best-model-pt "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new/best_model.pt" \
-  --sae-root /home/jovyan/LEM_data2/hyunjincho/sae_layerwise_out \
+  --model-name /home/jovyan/LEM_data2/data/bert_pretrained \
+  --vocab-path /home/jovyan/LEM_data2/data/preprocessed_www_new/skill2idx.json \
+  --best-model-pt "/home/jovyan/LEM_data2/data/checkpoints(www)_new/best_model.pt" \
+  --sae-root /home/jovyan/LEM_data2/data/sae_layerwise_out_8192 \
   --use-amp --amp-dtype bf16 \
   --out-dir ./python_industry
 """

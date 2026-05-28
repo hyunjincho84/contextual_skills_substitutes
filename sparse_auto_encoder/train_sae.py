@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, json, random, glob, math
+import os, sys, json, random, glob, math
 from typing import List
 
 import numpy as np
@@ -11,19 +11,24 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer
 from tqdm import tqdm
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "model_trains"))
+sys.path.insert(0, MODEL_DIR)
+
 from model import BERTForSkillPrediction
 
 
 # ─── Config ───────────────────────────────────────────────────────────────
-DATA_ROOT      = "/home/jovyan/LEM_data2/hyunjincho/preprocessed_www_new"
+BASE_DATA_DIR  = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
+DATA_ROOT      = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
 TRAIN_DIR      = os.path.join(DATA_ROOT, "train")
 VOCAB_PATH     = os.path.join(DATA_ROOT, "skill2idx.json")
 
-MODEL_NAME     = "/home/jovyan/LEM_data2/hyunjincho/bert_pretrained/checkpoint-165687"
-CKPT_DIR       = "/home/jovyan/LEM_data2/hyunjincho/checkpoints(www)_new"
+MODEL_NAME     = os.environ.get("BERT_MODEL_NAME", os.path.join(BASE_DATA_DIR, "bert_pretrained"))
+CKPT_DIR       = os.environ.get("CKPT_DIR", os.path.join(BASE_DATA_DIR, "checkpoints(www)_new"))
 BEST_MODEL_PT  = os.path.join(CKPT_DIR, "best_model.pt")
 
-OUT_DIR        = "/home/jovyan/LEM_data2/hyunjincho/sae_layerwise_out_8192"
+OUT_DIR        = os.environ.get("SAE_OUT_DIR", os.path.join(BASE_DATA_DIR, "sae_layerwise_out_8192"))
 
 MAX_LEN        = 512
 BATCH_SIZE     = 256
