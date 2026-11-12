@@ -10,9 +10,17 @@ class BERTForSkillPrediction(nn.Module):
     - Shares the same architecture as the main model:
     Dense → activation → LayerNorm → Linear (NumSkills).
     """
-    def __init__(self, model_name_or_path: str, num_skills: int):
+    def __init__(
+        self,
+        model_name_or_path: str,
+        num_skills: int,
+        attn_implementation: str = "sdpa",
+    ):
         super().__init__()
-        self.bert = BertModel.from_pretrained(model_name_or_path)
+        self.bert = BertModel.from_pretrained(
+            model_name_or_path,
+            attn_implementation=attn_implementation,
+        )
         hidden = self.bert.config.hidden_size
         self.dense = nn.Linear(hidden, hidden)
         self.transform_act_fn = ACT2FN[self.bert.config.hidden_act]

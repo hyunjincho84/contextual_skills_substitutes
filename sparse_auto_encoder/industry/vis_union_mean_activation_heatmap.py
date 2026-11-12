@@ -99,22 +99,34 @@ def reorder_columns_by_feature_clustering(mat: np.ndarray, union_ids: np.ndarray
     return mat[:, order], union_ids[order], labels[order]
 
 
-def plot_union_heatmap(mat, row_labels, out_png, title, cmap="winter", vmin=None, vmax=None):
-    fig = plt.figure(figsize=(18, 3.2))
+def plot_union_heatmap(
+    mat,
+    row_labels,
+    out_png,
+    title,
+    cmap="winter",
+    vmin=None,
+    vmax=None,
+    font_size=16,
+    figure_width=18.0,
+    figure_height=3.2,
+    dpi=300,
+):
+    fig = plt.figure(figsize=(figure_width, figure_height))
     ax = fig.add_subplot(1, 1, 1)
 
     im = ax.imshow(mat, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_yticks(range(len(row_labels)))
-    ax.set_yticklabels(row_labels,fontsize = 15)
+    ax.set_yticklabels(row_labels, fontsize=font_size - 1)
     ax.set_xticks([])
     ax.set_ylabel("")
-    ax.set_title(title, pad=10,fontsize=26)
+    ax.set_title(title, pad=10, fontsize=font_size + 10)
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
     cbar.set_label("", rotation=90)
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.savefig(out_png, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -233,6 +245,9 @@ def main():
     # plot
     ap.add_argument("--font-size", type=int, default=16)
     ap.add_argument("--cmap", type=str, default="winter")
+    ap.add_argument("--figure-width", type=float, default=18.0)
+    ap.add_argument("--figure-height", type=float, default=3.2)
+    ap.add_argument("--dpi", type=int, default=300)
     args = ap.parse_args()
 
     ensure_dir(args.out_dir)
@@ -375,7 +390,17 @@ def main():
         extra = "common_removed" if args.remove_all_common else "plain"
         title = f"Layer {layer:02d}"
         out_png = os.path.join(args.out_dir, f"union_mean_heatmap_layer_{layer:02d}_{args.col_order}.png")
-        plot_union_heatmap(mat, SHORT_ORDER, out_png, title, cmap=args.cmap)
+        plot_union_heatmap(
+            mat,
+            SHORT_ORDER,
+            out_png,
+            title,
+            cmap=args.cmap,
+            font_size=args.font_size,
+            figure_width=args.figure_width,
+            figure_height=args.figure_height,
+            dpi=args.dpi,
+        )
 
     # save sample counts
     out_counts = os.path.join(args.out_dir, "sample_counts_per_layer.csv")

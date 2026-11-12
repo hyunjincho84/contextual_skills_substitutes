@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, glob, json, random, argparse, sys
+import os, re, glob, json, random, argparse, sys, gc
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -35,7 +35,7 @@ def extract_year_from_path(path: str) -> int:
       .../preprocessed_www/train/2010/preprocessed_2010-01.csv.gz
       .../preprocessed_www/test/2010/preprocessed_2010-01.csv.gz
     """
-    m = re.search(r"/(?:train|test)/(20\d{2})/", path)
+    m = re.search(r"/(?:train|test(?:_clean)?)/(20\d{2})/", path)
     if m:
         return int(m.group(1))
     m2 = re.search(r"preprocessed_(20\d{2})-\d{2}\.csv", os.path.basename(path))
@@ -108,8 +108,8 @@ def batch_tokenize(tokenizer, sentences: List[str], max_len: int):
     mask_pos = (input_ids == tokenizer.mask_token_id)
     has_mask = mask_pos.any(dim=1)
 
+    keep = has_mask.nonzero(as_tuple=True)[0]
     if not bool(has_mask.all()):
-        keep = has_mask.nonzero(as_tuple=True)[0]
         input_ids = input_ids[keep]
         attn_mask = attn_mask[keep]
         mask_pos = mask_pos[keep]
@@ -118,8 +118,7 @@ def batch_tokenize(tokenizer, sentences: List[str], max_len: int):
         return input_ids, attn_mask, None, None
 
     mask_idx = mask_pos.float().argmax(dim=1)
-    keep_idx = torch.arange(input_ids.size(0))
-    return input_ids, attn_mask, mask_idx, keep_idx
+    return input_ids, attn_mask, mask_idx, keep
 
 
 # ------------------------------- sampling -------------------------------
@@ -181,6 +180,32 @@ def sample_per_field(
     df = pd.DataFrame(rows)
     df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     return df
+
+
+def collect_all_per_field(
+    files: List[str], truth_col: str, text_col: str, field_col: str,
+    target_skill: str, field_values: List[str], chunksize: int = 200_000,
+) -> pd.DataFrame:
+    """Collect every eligible target-skill row for cluster similarity."""
+    parts = []
+    usecols = [text_col, truth_col, field_col]
+    for fp in tqdm(files, desc="Collect all rows for similarity"):
+        year = extract_year_from_path(fp)
+        for chunk in pd.read_csv(fp, compression="gzip", usecols=usecols, chunksize=chunksize):
+            chunk = chunk.dropna(subset=[text_col, truth_col, field_col])
+            sub = chunk[
+                chunk[truth_col].astype(str).eq(target_skill)
+                & chunk[field_col].astype(str).isin(field_values)
+            ]
+            if not sub.empty:
+                parts.append(pd.DataFrame({
+                    "field": sub[field_col].astype(str).to_numpy(),
+                    "sentence": sub[text_col].astype(str).to_numpy(),
+                    "year": year,
+                }))
+    if not parts:
+        return pd.DataFrame(columns=["field", "sentence", "year"])
+    return pd.concat(parts, ignore_index=True)
 
 
 # ------------------------------- feature extraction -------------------------------
@@ -273,18 +298,18 @@ def extract_features_all_layers(
 
 # ------------------------------- element-centric similarity (CluSim) -------------------------------
 
-def element_centric_similarity_partition(
-    gt_labels: np.ndarray,
-    pred_labels: np.ndarray,
-    alpha: float = 0.90,
-) -> float:
-    """
-    CluSim element-centric similarity (partition case).
-    """
-    assert gt_labels.shape == pred_labels.shape
-    c_gt = Clustering().from_membership_list(gt_labels.tolist())
-    c_pr = Clustering().from_membership_list(pred_labels.tolist())
-    return float(sim.element_sim(c_gt, c_pr, alpha=alpha, r=1.0))
+def element_centric_similarity_partition(gt_labels: np.ndarray, pred_labels: np.ndarray, alpha: float = 0.90) -> float:
+    """Exact CluSim element similarity for hard partitions without NxN matrices."""
+    if gt_labels.shape != pred_labels.shape:
+        raise ValueError("Partition label arrays must have the same shape.")
+    if len(gt_labels) == 0:
+        return float("nan")
+    _, gt = np.unique(gt_labels, return_inverse=True)
+    _, pred = np.unique(pred_labels, return_inverse=True)
+    table = np.zeros((gt.max() + 1, pred.max() + 1), dtype=np.int64)
+    np.add.at(table, (gt, pred), 1)
+    denom = np.maximum(table.sum(axis=1)[:, None], table.sum(axis=0)[None, :])
+    return float(np.sum(table * table / denom) / len(gt))
 
 
 # ------------------------------- k-means per layer + similarity (+ random null) -------------------------------
@@ -337,6 +362,110 @@ def kmeans_and_similarity_per_layer(
     return pd.DataFrame(sim_rows), pd.DataFrame(rand_rows)
 
 
+@torch.no_grad()
+def full_data_similarity_per_layer(
+    df_all, bert, tokenizer, layers, device, batch_size, max_len,
+    use_amp, amp_dtype, repr_mode, sae_root, d_hidden,
+    field_values, alpha, seed, k, checkpoint_dir,
+):
+    """Cluster each sampled/full layer with KMeans and checkpoint its similarity."""
+    from sklearn.cluster import KMeans
+
+    sentences = df_all["sentence"].astype(str).tolist()
+    labels = df_all["field"].astype(str).tolist()
+    label_to_gt = {v: i for i, v in enumerate(field_values)}
+    n = len(sentences)
+    out_dim = d_hidden if repr_mode == "sae" else bert.config.hidden_size
+    sim_path = os.path.join(checkpoint_dir, "element_centric_similarity_by_layer.csv")
+    rand_path = os.path.join(checkpoint_dir, "element_centric_similarity_random_null_by_layer.csv")
+    cache_dir = os.path.join(checkpoint_dir, ".similarity_cache")
+    ensure_dir(cache_dir)
+
+    def load_results(csv_path):
+        if not os.path.isfile(csv_path):
+            return []
+        old = pd.read_csv(csv_path)
+        if "data_scope" not in old.columns:
+            return []
+        return old[old["data_scope"].eq("full")].to_dict("records")
+
+    sim_rows = [
+        row for row in load_results(sim_path)
+        if row.get("clustering") == "KMeans"
+    ]
+    kmeans_layers = {int(row["layer"]) for row in sim_rows}
+    rand_rows = [
+        row for row in load_results(rand_path)
+        if int(row["layer"]) in kmeans_layers
+    ]
+    completed = {int(r["layer"]) for r in sim_rows} & {int(r["layer"]) for r in rand_rows}
+
+    for layer in tqdm(layers, desc="KMeans similarity by layer"):
+        if layer in completed:
+            print(f"[RESUME] Layer {layer:02d} similarity already saved.")
+            continue
+        sae = load_sae_for_layer(sae_root, layer, bert.config.hidden_size, d_hidden, device) if repr_mode == "sae" else None
+        feature_path = os.path.join(cache_dir, f"layer_{layer:02d}_features.f32")
+        label_path = os.path.join(cache_dir, f"layer_{layer:02d}_labels.i32")
+        meta_path = os.path.join(cache_dir, f"layer_{layer:02d}.json")
+        cache_ready = all(os.path.isfile(p) for p in (feature_path, label_path, meta_path))
+
+        if cache_ready:
+            with open(meta_path) as handle:
+                offset = int(json.load(handle)["rows"])
+            print(f"[RESUME] Reusing layer {layer:02d} cache ({offset:,} rows).")
+        else:
+            Xw = np.memmap(feature_path, mode="w+", dtype=np.float32, shape=(n, out_dim))
+            yw = np.memmap(label_path, mode="w+", dtype=np.int32, shape=(n,))
+            offset = 0
+            for start in tqdm(range(0, n, batch_size), desc=f"  layer={layer:02d}", leave=False):
+                ids, mask, mask_idx, keep_idx = batch_tokenize(tokenizer, sentences[start:start + batch_size], max_len=max_len)
+                if ids.numel() == 0 or mask_idx is None:
+                    continue
+                ids, mask, mask_idx = ids.to(device), mask.to(device), mask_idx.to(device)
+                enabled = use_amp and device.startswith("cuda") and torch.cuda.is_available()
+                with torch.autocast("cuda", dtype=amp_dtype, enabled=enabled):
+                    h = forward_until_layer(bert, ids, mask, layer)
+                    x = h[torch.arange(h.size(0), device=device), mask_idx]
+                    features = sae.encode(x) if repr_mode == "sae" else x
+                features = features.float().cpu().numpy()
+                kept = keep_idx.tolist()
+                count = len(kept)
+                Xw[offset:offset + count] = features
+                yw[offset:offset + count] = [label_to_gt[labels[start + j]] for j in kept]
+                offset += count
+            Xw.flush(); yw.flush()
+            del Xw, yw
+            with open(meta_path, "w") as handle:
+                json.dump({"rows": offset, "dim": out_dim}, handle)
+            print(f"[CHECKPOINT] Layer {layer:02d} feature cache saved ({offset:,} rows).")
+
+        X = np.memmap(feature_path, mode="r", dtype=np.float32, shape=(n, out_dim))
+        ymap = np.memmap(label_path, mode="r", dtype=np.int32, shape=(n,))
+        y = np.asarray(ymap[:offset])
+        X_fit = np.asarray(X[:offset])
+        km = KMeans(n_clusters=k, random_state=seed, n_init="auto")
+        pred = km.fit_predict(X_fit).astype(np.int32)
+
+        score = element_centric_similarity_partition(y, pred, alpha)
+        sim_rows.append({"layer": layer, "similarity": score, "n": offset, "data_scope": "full", "clustering": "KMeans"})
+        rng = np.random.default_rng(seed + layer)
+        random_pred = rng.integers(0, k, size=offset, dtype=np.int32)
+        random_score = element_centric_similarity_partition(y, random_pred, alpha)
+        rand_rows.append({"layer": layer, "similarity": random_score, "n": offset, "data_scope": "full", "clustering": "random"})
+        pd.DataFrame(sim_rows).sort_values("layer").to_csv(sim_path, index=False)
+        pd.DataFrame(rand_rows).sort_values("layer").to_csv(rand_path, index=False)
+        print(f"[CHECKPOINT] Layer {layer:02d} similarity saved.")
+
+        del X, X_fit, ymap, y, pred, random_pred, km, sae
+        for p in (feature_path, label_path, meta_path):
+            if os.path.exists(p): os.remove(p)
+        gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+    return pd.DataFrame(sim_rows).sort_values("layer"), pd.DataFrame(rand_rows).sort_values("layer")
+
+
 # ------------------------------- main -------------------------------
 
 def main():
@@ -377,8 +506,16 @@ def main():
     ap.add_argument("--use-amp", action="store_true")
     ap.add_argument("--amp-dtype", type=str, default="bf16", choices=["bf16", "fp16"])
 
+    ap.add_argument("--umap-n-neighbors", type=int, default=30)
+    ap.add_argument("--umap-min-dist", type=float, default=0.10)
+    ap.add_argument("--umap-metric", type=str, default="cosine")
+
     ap.add_argument("--kmeans-k", type=int, default=None, help="default: len(field_values)")
     ap.add_argument("--ec-alpha", type=float, default=0.90)
+    ap.add_argument(
+        "--similarity-per-field", type=int, default=None,
+        help="Balanced cluster-similarity sample per SOC field; default uses all rows.",
+    )
 
     ap.add_argument("--out-dir", type=str, default=None)
     args = ap.parse_args()
@@ -419,18 +556,24 @@ def main():
 
     print(f"[INFO] Found {len(files)} files")
 
-    # 1) sampling (no file save)
-    df_samples = sample_per_field(
-        files=files,
-        truth_col=args.truth_col,
-        text_col=args.text_col,
-        field_col=args.field_col,
-        target_skill=args.target_skill,
-        field_values=args.field_values,
-        per_field=args.per_field,
-        seed=args.seed,
-    )
-    print(f"[INFO] samples collected: n={len(df_samples)}")
+    out_feat = os.path.join(args.out_dir, "features.parquet")
+    if os.path.isfile(out_feat):
+        df_feat = pd.read_parquet(out_feat)
+        df_samples = None
+        print(f"[RESUME] Reusing sampled UMAP features: {out_feat} (rows={len(df_feat)})")
+    else:
+        # 1) balanced sampling for UMAP only
+        df_samples = sample_per_field(
+            files=files,
+            truth_col=args.truth_col,
+            text_col=args.text_col,
+            field_col=args.field_col,
+            target_skill=args.target_skill,
+            field_values=args.field_values,
+            per_field=args.per_field,
+            seed=args.seed,
+        )
+        print(f"[INFO] samples collected: n={len(df_samples)}")
 
     # 2) load model
     tokenizer = BertTokenizer.from_pretrained(args.model_name)
@@ -446,41 +589,88 @@ def main():
     for p in bert.parameters():
         p.requires_grad_(False)
 
-    # 3) features (no parquet save)
-    df_feat = extract_features_all_layers(
-        df_samples=df_samples,
-        bert=bert,
-        tokenizer=tokenizer,
-        layers=layers,
-        device=args.device,
-        batch_size=args.batch_size,
-        max_len=args.max_len,
-        use_amp=args.use_amp,
-        amp_dtype=amp_dtype,
-        repr_mode=args.repr,
-        sae_root=args.sae_root,
-        d_hidden=args.d_hidden,
-    )
-    print(f"[INFO] features extracted (rows={len(df_feat)})")
-
-    # ✅ NEW: save features.parquet (same as previous pipeline)
-    out_feat = os.path.join(args.out_dir, "features.parquet")
-    df_feat.to_parquet(out_feat, index=False)
-    print(f"[OK] Saved: {out_feat}")
+    # 3) sampled features for UMAP only
+    if df_samples is not None:
+        df_feat = extract_features_all_layers(
+            df_samples=df_samples,
+            bert=bert,
+            tokenizer=tokenizer,
+            layers=layers,
+            device=args.device,
+            batch_size=args.batch_size,
+            max_len=args.max_len,
+            use_amp=args.use_amp,
+            amp_dtype=amp_dtype,
+            repr_mode=args.repr,
+            sae_root=args.sae_root,
+            d_hidden=args.d_hidden,
+        )
+        print(f"[INFO] features extracted (rows={len(df_feat)})")
+        df_feat.to_parquet(out_feat, index=False)
+        print(f"[OK] Saved: {out_feat}")
     
     feat_cols = [c for c in df_feat.columns if re.fullmatch(r"f\d+", c)]
     print(f"[INFO] feature dim = {len(feat_cols)} (repr={args.repr})")
 
-    # 4) k-means + element-centric similarity (+ random-null); only save CSVs needed downstream
+    # 4) Cluster similarity optionally uses a balanced sample per SOC field.
+    full_rows_cache = os.path.join(args.out_dir, "full_similarity_rows.parquet")
+    if os.path.isfile(full_rows_cache):
+        df_all = pd.read_parquet(full_rows_cache)
+        print(f"[RESUME] Reusing full similarity rows: {full_rows_cache}")
+    else:
+        df_all = collect_all_per_field(
+            files=files,
+            truth_col=args.truth_col,
+            text_col=args.text_col,
+            field_col=args.field_col,
+            target_skill=args.target_skill,
+            field_values=args.field_values,
+        )
+        if df_all.empty:
+            raise RuntimeError("No full-data rows collected for cluster similarity.")
+        df_all.to_parquet(full_rows_cache, index=False)
+        print(f"[CHECKPOINT] Full similarity rows saved: {full_rows_cache}")
+    print(f"[INFO] eligible similarity rows: n={len(df_all)}")
+    similarity_checkpoint_dir = args.out_dir
+    if args.similarity_per_field is not None:
+        if args.similarity_per_field <= 0:
+            raise ValueError("--similarity-per-field must be positive.")
+        similarity_checkpoint_dir = os.path.join(
+            args.out_dir, f"similarity_per_field_{args.similarity_per_field}"
+        )
+        ensure_dir(similarity_checkpoint_dir)
+        sampled_rows_cache = os.path.join(similarity_checkpoint_dir, "similarity_rows.parquet")
+        if os.path.isfile(sampled_rows_cache):
+            df_all = pd.read_parquet(sampled_rows_cache)
+            print(f"[RESUME] Reusing balanced similarity sample: {sampled_rows_cache}")
+        else:
+            counts = df_all.groupby("field", observed=True).size()
+            missing = [v for v in args.field_values if counts.get(v, 0) < args.similarity_per_field]
+            if missing:
+                details = ", ".join(f"{v}={int(counts.get(v, 0))}" for v in missing)
+                raise RuntimeError(
+                    f"Not enough rows for --similarity-per-field={args.similarity_per_field}: {details}"
+                )
+            df_all = (
+                df_all.groupby("field", group_keys=False, observed=True)
+                .sample(n=args.similarity_per_field, replace=False, random_state=args.seed)
+                .sample(frac=1.0, random_state=args.seed)
+                .reset_index(drop=True)
+            )
+            df_all.to_parquet(sampled_rows_cache, index=False)
+            print(f"[CHECKPOINT] Balanced similarity sample saved: {sampled_rows_cache}")
+        print(
+            f"[INFO] balanced SOC similarity rows: n={len(df_all)} "
+            f"({args.similarity_per_field} per field)"
+        )
     k = args.kmeans_k if args.kmeans_k is not None else len(args.field_values)
-    df_sim, df_rand = kmeans_and_similarity_per_layer(
-        df_feat=df_feat,
-        feat_cols=feat_cols,
-        field_values=args.field_values,
-        alpha=args.ec_alpha,
-        seed=args.seed,
-        k=k,
+    df_sim, df_rand = full_data_similarity_per_layer(
+        df_all, bert, tokenizer, layers, args.device, args.batch_size,
+        args.max_len, args.use_amp, amp_dtype, args.repr, args.sae_root,
+        args.d_hidden, args.field_values, args.ec_alpha, args.seed, k,
+        similarity_checkpoint_dir,
     )
+    del df_all
 
     out_sim_csv = os.path.join(args.out_dir, "element_centric_similarity_by_layer.csv")
     df_sim.to_csv(out_sim_csv, index=False)
@@ -505,9 +695,9 @@ def main():
 
     X_all = df_feat[feat_cols].to_numpy(np.float32)
     reducer = umap.UMAP(
-        n_neighbors=30,
-        min_dist=0.10,
-        metric="cosine",
+        n_neighbors=args.umap_n_neighbors,
+        min_dist=args.umap_min_dist,
+        metric=args.umap_metric,
         random_state=args.seed,
         n_components=2,
     )

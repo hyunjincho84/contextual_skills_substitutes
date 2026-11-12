@@ -6,23 +6,23 @@ For a TARGET_SKILL, compute YEAR-wise Top-K substitutes using posting-level
 "most-sub" weights (post-normalized within each job posting).
 
 Core idea
-- Within the same posting (row_idx), if the same truth appears n times (n occurrences),
-  we pick exactly ONE "most-sub" candidate per occurrence:
-    - default: Top-1 from pred_top5
-    - if Top-1 == truth, use Top-2 (if available)
-    - if no valid candidate remains, skip that occurrence
+- A posting is identified by (source-file identifier, row_idx).
+- For each target occurrence, use the explicit truth-excluded substitution column.
 - For a posting, we count how many times each candidate was chosen (cnt),
   then distribute weight by cnt / n_occ (post-normalization within posting).
 - Aggregate these posting-level weights by YEAR to obtain the final ranking.
 - Ranking criterion: weight_sum per year (sum of posting-level weights).
   For readability, we also provide year-wise normalized weight (weight_norm).
 
-Expected input format (BERT monthly predictions):
+Expected input format (BERT monthly Top-10 predictions):
 - Files under:
     pred_root/YYYY/predictions_YYYY-MM.csv.gz   (or .csv)
 - Each predictions file must contain columns:
-    row_idx, truth, pred_top5, pred_top5_probs
-  (pred_top5_probs is parsed defensively but not used in the scoring itself)
+    row_idx, truth, substitution, and a source identifier such as
+    preprocessed_file_path.
+
+Because row_idx restarts for each source file, a posting is identified by
+(__src, row_idx), where __src is derived from --posting-source-col.
 
 Output CSV columns:
     truth, year, rank, substitute, weight_sum, weight_norm
@@ -92,16 +92,16 @@ def infer_year_from_path(fp: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def pick_most_sub_for_row(pred_top5: str, pred_probs: str, truth_lower: str) -> Optional[str]:
+def pick_most_sub_for_row(pred_top10: str, pred_probs: str, truth_lower: str) -> Optional[str]:
     """
     Pick exactly ONE "most-sub" candidate from a single occurrence row.
-    - default: Top-1 from pred_top5
+    - default: Top-1 from pred_top10
     - if Top-1 == truth, use Top-2
     - if both are truth or no candidate, return None
 
     pred_probs is parsed defensively only for integrity checks (not used in scoring).
     """
-    cands = [c.strip() for c in str(pred_top5 or "").split("|") if c.strip()]
+    cands = [c.strip() for c in str(pred_top10 or "").split("|") if c.strip()]
 
     # Defensive parsing of probs (not used for scoring)
     probs = []
@@ -134,14 +134,31 @@ def pick_most_sub_for_row(pred_top5: str, pred_probs: str, truth_lower: str) -> 
 # ------------------------
 # Load
 # ------------------------
-def load_predictions(pred_root: str, usecols_only: bool = True) -> pd.DataFrame:
+def load_predictions(
+    pred_root: str,
+    usecols_only: bool = True,
+    candidate_col: str = "substitution",
+    posting_source_col: str = "preprocessed_file_path",
+    years: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """
     Load monthly predictions files and attach year (from file path if needed).
     """
     files = find_prediction_files(pred_root)
+    if years:
+        wanted = set(map(str, years))
+        files = [fp for fp in files if infer_year_from_path(fp) in wanted]
+        if not files:
+            raise FileNotFoundError("After --years filtering, no files remain.")
     dfs = []
 
-    need_cols = ["row_idx", "truth", "pred_top5", "pred_top5_probs"]
+    need_cols = [
+        "row_idx",
+        "truth",
+        candidate_col,
+        posting_source_col,
+        "file",
+    ]
 
     for fp in tqdm(files, desc="Loading predictions files", unit="file"):
         try:
@@ -156,8 +173,23 @@ def load_predictions(pred_root: str, usecols_only: bool = True) -> pd.DataFrame:
             if "year" not in df.columns:
                 y = infer_year_from_path(fp)
                 df["year"] = y
+            if "file" not in df.columns:
+                df["file"] = os.path.basename(fp)
+            if candidate_col not in df.columns:
+                raise ValueError(f"missing candidate column: {candidate_col}")
 
-            df["__src"] = fp
+            fallback_source = fp + "::" + df["file"].fillna("").astype(str)
+            if posting_source_col in df.columns:
+                posting_source = (
+                    df[posting_source_col].fillna("").astype(str).str.strip()
+                )
+                posting_source = posting_source.where(
+                    posting_source.ne(""),
+                    fallback_source,
+                )
+            else:
+                posting_source = fallback_source
+            df["__src"] = posting_source
             dfs.append(df)
         except Exception as e:
             print(f"[WARN] skip {fp}: {e}")
@@ -173,7 +205,8 @@ def load_predictions(pred_root: str, usecols_only: bool = True) -> pd.DataFrame:
 def yearwise_topk_mostsubs_postnorm(
     df: pd.DataFrame,
     target_skill: str,
-    out_topk: int = 5
+    candidate_col: str = "substitution",
+    out_topk: int = 5,
 ) -> pd.DataFrame:
     """
     For a target truth skill, pick 1 "most-sub" per occurrence, apply posting-level
@@ -182,7 +215,13 @@ def yearwise_topk_mostsubs_postnorm(
     Returns columns:
       truth, year, rank, substitute, weight_sum, weight_norm
     """
-    required = {"row_idx", "truth", "pred_top5", "pred_top5_probs", "year"}
+    required = {
+        "__src",
+        "row_idx",
+        "truth",
+        candidate_col,
+        "year",
+    }
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -194,21 +233,17 @@ def yearwise_topk_mostsubs_postnorm(
     if df_t.empty:
         raise ValueError(f"No rows for TARGET_SKILL='{target_skill}'")
 
-    # 1) Pick one most-sub per occurrence
+    # 1) Use the explicit truth-excluded substitute for each occurrence.
     picks = []
     for _, r in df_t.iterrows():
         year = r.get("year", None)
-        sub = pick_most_sub_for_row(
-            r.get("pred_top5", ""),
-            r.get("pred_top5_probs", ""),
-            t_low
-        )
-        if sub is None:
-            continue
-        if safe_lower(sub) == t_low:
+        raw_sub = r.get(candidate_col, "")
+        sub = str(raw_sub).strip() if pd.notna(raw_sub) else ""
+        if not sub or safe_lower(sub) == t_low:
             continue
 
         picks.append({
+            "__src": r["__src"],
             "row_idx": r["row_idx"],
             "year": year,
             "truth": r["truth"],
@@ -220,22 +255,25 @@ def yearwise_topk_mostsubs_postnorm(
 
     pick_df = pd.DataFrame(picks)
 
-    # 2) n_occ per posting: (row_idx, year, truth)
+    # 2) n_occ per posting: (__src, row_idx, year, truth)
     occ_count = (
-        df_t.groupby(["row_idx", "year", "truth"])
+        df_t.groupby(["__src", "row_idx", "year", "truth"])
             .size().rename("n_occ").reset_index()
     )
 
-    # 3) cnt per posting: (row_idx, year, truth, candidate)
+    # 3) cnt per posting: (__src, row_idx, year, truth, candidate)
     post_counts = (
-        pick_df.groupby(["row_idx", "year", "truth", "candidate"])
+        pick_df.groupby(["__src", "row_idx", "year", "truth", "candidate"])
                .size().rename("cnt").reset_index()
     )
 
     # 4) posting-level weight = cnt / n_occ
     post_weights = (
-        post_counts.merge(occ_count, on=["row_idx", "year", "truth"], how="left")
-                   .assign(weight=lambda x: x["cnt"] / x["n_occ"].clip(lower=1))
+        post_counts.merge(
+            occ_count,
+            on=["__src", "row_idx", "year", "truth"],
+            how="left",
+        ).assign(weight=lambda x: x["cnt"] / x["n_occ"].clip(lower=1))
     )
 
     # 5) aggregate by year: sum weights
@@ -280,6 +318,12 @@ def parse_args():
                     help="Target truth skill to evaluate (case-insensitive)")
     ap.add_argument("--out", required=True,
                     help="Output CSV path")
+    ap.add_argument("--candidate-col", default="substitution",
+                    help="Truth-excluded substitute column in the prediction files")
+    ap.add_argument("--posting-source-col", default="preprocessed_file_path",
+                    help="Column identifying the source file in which row_idx is defined")
+    ap.add_argument("--years", nargs="*", default=None,
+                    help="Optional years to include, e.g. --years 2018 2019")
     ap.add_argument("--out-topk", type=int, default=5,
                     help="Top-K substitutes to keep per year")
     ap.add_argument("--no-usecols", action="store_true",
@@ -290,13 +334,20 @@ def parse_args():
 def main():
     args = parse_args()
 
-    df = load_predictions(args.pred_root, usecols_only=(not args.no_usecols))
+    df = load_predictions(
+        args.pred_root,
+        usecols_only=(not args.no_usecols),
+        candidate_col=args.candidate_col,
+        posting_source_col=args.posting_source_col,
+        years=args.years,
+    )
     print(f"[INFO] Loaded {len(df):,} rows from predictions files")
 
     out_df = yearwise_topk_mostsubs_postnorm(
         df,
         target_skill=args.target_skill,
-        out_topk=args.out_topk
+        candidate_col=args.candidate_col,
+        out_topk=args.out_topk,
     )
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

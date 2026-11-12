@@ -57,14 +57,37 @@ BASE_DATA_DIR="${BASE_DATA_DIR:-/home/jovyan/LEM_data2/data}"
 FEATURES_PARQUET="${FEATURES_PARQUET:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/features.parquet}"
 OUT_DIR="${OUT_DIR:-${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/feature_id_vis}"
 
-# ---------- common params ----------
+# ============================================================
+# EDIT PARAMETERS HERE
+# ============================================================
 LAYERS="1-12"
 TOPK=64
 SAMPLES_PER_INDUSTRY=250
+SEED=42
+REMOVE_ALL_COMMON=true
 CANDIDATE_MULT=10
-N_CLUSTERS=12
-FONT_SIZE=16
+MAX_ROUNDS=10000
 COL_ORDER="cluster"
+N_CLUSTERS=12
+
+RAW_FONT_SIZE=16
+RAW_CMAP="winter"
+THRESHOLD_QUANTILE="0.75"
+THRESHOLD_FONT_SIZE=16
+FIGURE_WIDTH="18.0"
+FIGURE_HEIGHT="3.2"
+PLOT_DPI=300
+# ============================================================
+
+if [[ "${REMOVE_ALL_COMMON}" != "true" && "${REMOVE_ALL_COMMON}" != "false" ]]; then
+  echo "REMOVE_ALL_COMMON must be true or false." >&2
+  exit 2
+fi
+
+COMMON_FLAG_ARGS=()
+if [[ "${REMOVE_ALL_COMMON}" == "true" ]]; then
+  COMMON_FLAG_ARGS+=(--remove-all-common)
+fi
 
 # ============================================================
 # [1/2] Union mean activation heatmap (raw)
@@ -75,15 +98,20 @@ ts "Running vis_union_mean_activation_heatmap.py"
 "${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/vis_union_mean_activation_heatmap.py" \
   --features-parquet "${FEATURES_PARQUET}" \
   --out-dir "${OUT_DIR}" \
-  --layers ${LAYERS} \
-  --topk ${TOPK} \
-  --samples-per-industry ${SAMPLES_PER_INDUSTRY} \
-  --remove-all-common \
-  --candidate-mult ${CANDIDATE_MULT} \
-  --col-order ${COL_ORDER} \
-  --n-clusters ${N_CLUSTERS} \
-  --font-size ${FONT_SIZE} \
-  --cmap winter
+  --layers "${LAYERS}" \
+  --topk "${TOPK}" \
+  --samples-per-industry "${SAMPLES_PER_INDUSTRY}" \
+  --seed "${SEED}" \
+  "${COMMON_FLAG_ARGS[@]}" \
+  --candidate-mult "${CANDIDATE_MULT}" \
+  --max-rounds "${MAX_ROUNDS}" \
+  --col-order "${COL_ORDER}" \
+  --n-clusters "${N_CLUSTERS}" \
+  --font-size "${RAW_FONT_SIZE}" \
+  --cmap "${RAW_CMAP}" \
+  --figure-width "${FIGURE_WIDTH}" \
+  --figure-height "${FIGURE_HEIGHT}" \
+  --dpi "${PLOT_DPI}"
 
 # ============================================================
 # [2/2] Union mean activation heatmap (quantile-thresholded)
@@ -94,14 +122,20 @@ ts "Running vis_union_mean_activation_heatmap_threshold.py"
 "${PYTHON_BIN}" "${REPO_ROOT}/sparse_auto_encoder/industry/vis_union_mean_activation_heatmap_threshold.py" \
   --features-parquet "${FEATURES_PARQUET}" \
   --out-dir "${OUT_DIR}" \
-  --layers ${LAYERS} \
-  --topk ${TOPK} \
-  --samples-per-industry ${SAMPLES_PER_INDUSTRY} \
-  --remove-all-common \
-  --candidate-mult ${CANDIDATE_MULT} \
-  --col-order ${COL_ORDER} \
-  --n-clusters ${N_CLUSTERS} \
-  --quantile 0.75
+  --layers "${LAYERS}" \
+  --topk "${TOPK}" \
+  --samples-per-industry "${SAMPLES_PER_INDUSTRY}" \
+  --seed "${SEED}" \
+  "${COMMON_FLAG_ARGS[@]}" \
+  --candidate-mult "${CANDIDATE_MULT}" \
+  --max-rounds "${MAX_ROUNDS}" \
+  --col-order "${COL_ORDER}" \
+  --n-clusters "${N_CLUSTERS}" \
+  --quantile "${THRESHOLD_QUANTILE}" \
+  --font-size "${THRESHOLD_FONT_SIZE}" \
+  --figure-width "${FIGURE_WIDTH}" \
+  --figure-height "${FIGURE_HEIGHT}" \
+  --dpi "${PLOT_DPI}"
 
 # ============================================================
 # DONE

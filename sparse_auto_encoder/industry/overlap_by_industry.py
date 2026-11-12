@@ -141,6 +141,8 @@ def main():
     ap.add_argument("--font-size", type=int, default=16)
     ap.add_argument("--max-iters", type=int, default=20,
                     help="safety cap for iterative common-feature removal")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dpi", type=int, default=300)
 
     ap.add_argument("--grid-out-name", type=str, default="heatmap_overlap_all_layers.png",
                     help="Output filename for the combined grid image.")
@@ -195,7 +197,7 @@ def main():
             subL.groupby("field_short", group_keys=False)
                 .apply(lambda g: g.sample(
                     n=min(len(g), args.samples_per_industry),
-                    random_state=42))
+                    random_state=args.seed))
                 .reset_index(drop=True)
         )
 
@@ -276,7 +278,7 @@ def main():
         out_png=out_grid,
         title_prefix="Layer",
         ncols=args.grid_cols,
-        dpi=300,
+        dpi=args.dpi,
     )
     print(f"[OK] Saved combined heatmap grid -> {out_grid}")
     print(f"[OK] Saved per-layer CSVs -> {csv_dir}")

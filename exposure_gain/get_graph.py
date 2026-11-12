@@ -1,406 +1,333 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Compute posting-level positive-margin ratio (2025)
-AND plot posting-level max margin_ratio distribution.
+"""Compute posting-level Google Trends margin ratios and plot their distribution."""
 
-Pipeline
---------
-1) Read prediction files (predictions_2025-*.csv.gz) that contain:
-   ['year', 'file', 'truth', 'pred_top1', 'pred_top5', 'masked_sentence'].
-
-2) For each prediction row, define `subs` as:
-   - parse pred_top5 into a list
-   - pick the first candidate != truth  (top-ranked WRONG)
-
-3) Use preprocessed files referenced by pred['file'] under:
-   --preprocessed-root
-   to attach posting id columns:
-   - row_idx
-   - file_path
-   Posting id = (row_idx, file_path)
-
-4) Read trends table (--margin-csv) with columns:
-   truth, subs, year_month, truth_trend, subs_trend, trend_diff
-   and compute:
-   margin_ratio = (subs_trend - truth_trend) / truth_trend * 100
-   (or trend_diff / truth_trend * 100 if trend_diff exists)
-
-5) Merge margin_ratio onto (truth, subs, year_month)
-
-6) Optional: drop bidirectional swaps within the same posting
-   (A->B and B->A both exist in same posting)
-
-7) Posting-level aggregation:
-   - has_positive_margin := any(margin_ratio > 0)
-   - max_margin_ratio := max(margin_ratio)
-
-8) Print posting-level positive ratio
-9) Plot histogram of posting-level max_margin_ratio for positive-only, log-binned x-axis.
-"""
-
+import argparse
+import glob
 import os
 import re
-import glob
-import json
-import ast
-import argparse
-from typing import List, Optional
+from typing import List
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data3/hyunjincho/LEM")
+ANALYSIS_YEAR = os.environ.get("ANALYSIS_YEAR", "2025")
+EXPOSURE_GAIN_DIR = os.path.join(BASE_DATA_DIR, "exposure_gain")
+DEFAULT_PRED_DIR = os.path.join(
+    BASE_DATA_DIR,
+    "predictions_clean",
+    "bert_pred",
+    "pred",
+    ANALYSIS_YEAR,
+)
+DEFAULT_PRED_GLOB = f"predictions_{ANALYSIS_YEAR}-*.csv.gz"
+DEFAULT_MARGIN_CSV = os.path.join(
+    EXPOSURE_GAIN_DIR, f"trends_by_pair_{ANALYSIS_YEAR}.csv"
+)
+DEFAULT_OUT_FIG = os.path.join(
+    EXPOSURE_GAIN_DIR,
+    f"posting_margin_ratio_hist_{ANALYSIS_YEAR}_clean.png",
+)
 
-# --------------------------------------------------
-# Helpers
-# --------------------------------------------------
 
-def ensure_dir(p: str):
-    if p:
-        os.makedirs(p, exist_ok=True)
+def ensure_dir(path: str) -> None:
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 def parse_year_month_from_filename(path: str) -> str:
-    """
-    Expect filenames like predictions_2025-01.csv.gz, predictions_2025-12.csv.gz
-    """
+    """Extract YYYYMM from predictions_YYYY-MM.csv[.gz]."""
     base = os.path.basename(path)
-    m = re.search(r"(\d{4})-(\d{1,2})", base)
-    if not m:
-        # fallback: any 6-digit
-        m2 = re.search(r"(\d{6})", base)
-        if not m2:
-            raise ValueError(f"Cannot parse year_month from {path}")
-        return m2.group(1)
-
-    y = m.group(1)
-    mm = str(int(m.group(2))).zfill(2)
-    return f"{y}{mm}"
-
-
-def safe_parse_topk_list(x) -> List[str]:
-    """
-    Parse pred_top5 which may be:
-      - python list string: "['a','b']"
-      - json list string: '["a","b"]'
-      - delimited string: "a|b|c" or "a, b, c"
-      - already a list
-    """
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return []
-    if isinstance(x, list):
-        return [str(v).strip() for v in x if str(v).strip()]
-
-    s = str(x).strip()
-    if not s:
-        return []
-
-    # try JSON / python literal
-    for fn in (json.loads, ast.literal_eval):
-        try:
-            obj = fn(s)
-            if isinstance(obj, list):
-                return [str(v).strip() for v in obj if str(v).strip()]
-        except Exception:
-            pass
-
-    # try delimiters
-    if "|" in s:
-        return [p.strip() for p in s.split("|") if p.strip()]
-    if "," in s:
-        return [p.strip() for p in s.split(",") if p.strip()]
-
-    return [s]
-
-
-def pick_top_wrong(truth: str, top_list: List[str]) -> Optional[str]:
-    """
-    Return first candidate != truth.
-    """
-    t = (truth or "").strip()
-    for c in top_list:
-        c = (c or "").strip()
-        if c and c != t:
-            return c
-    return None
-
-
-def attach_posting_ids(pred_block: pd.DataFrame, preprocessed_path: str) -> pd.DataFrame:
-    """
-    Attach row_idx/file_path. Prefer IDs already saved in prediction files;
-    fall back to row-order alignment for older prediction outputs.
-    """
-    if {"row_idx", "file_path"}.issubset(pred_block.columns):
-        out = pred_block.copy()
-        fp = out["file_path"].astype(str).str.strip()
-        if fp.ne("").any() and fp.ne("nan").any():
-            return out
-
-    pre = pd.read_csv(
-        preprocessed_path,
-        compression="gzip" if preprocessed_path.endswith(".gz") else None,
-        low_memory=False,
-    )
-
-    need = {"row_idx", "file_path"}
-    miss = need - set(pre.columns)
-    if miss:
-        raise ValueError(f"[preprocessed] Missing {miss} in {preprocessed_path}. Columns={list(pre.columns)}")
-
-    pre = pre.reset_index(drop=True)
-    out = pred_block.reset_index(drop=True).copy()
-
-    if len(out) > len(pre):
-        raise ValueError(
-            f"[align] pred rows ({len(out)}) > pre rows ({len(pre)}) for {preprocessed_path}"
-        )
-
-    out["row_idx"] = pre.loc[:len(out)-1, "row_idx"].to_numpy()
-    out["file_path"] = pre.loc[:len(out)-1, "file_path"].astype(str).to_numpy()
-    return out
+    match = re.search(r"(\d{4})-(\d{1,2})", base)
+    if match:
+        return f"{match.group(1)}{int(match.group(2)):02d}"
+    match = re.search(r"(\d{6})", base)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Cannot parse year_month from {path}")
 
 
 def drop_bidirectional(df_long: pd.DataFrame, posting_cols: List[str]) -> pd.DataFrame:
-    """
-    Drop rows where within the same posting, both A->B and B->A exist.
-    df_long must contain: posting_cols + truth + subs
-    """
+    """Drop both directions when A->B and B->A occur in one posting."""
     work = df_long.copy()
-
-    a = work["truth"].astype(str)
-    b = work["subs"].astype(str)
-    work["_a"] = a.where(a <= b, b)
-    work["_b"] = b.where(a <= b, a)
+    truth = work["truth"].astype(str)
+    subs = work["subs"].astype(str)
+    work["_a"] = truth.where(truth <= subs, subs)
+    work["_b"] = subs.where(truth <= subs, truth)
     work["_dir"] = (work["truth"] != work["_a"]).astype(int)
 
-    grp = work.groupby(posting_cols + ["_a", "_b"])["_dir"].nunique()
-    bidir = grp[grp == 2].reset_index()[posting_cols + ["_a", "_b"]]
-
+    grouped = work.groupby(posting_cols + ["_a", "_b"])["_dir"].nunique()
+    bidirectional = grouped[grouped == 2].reset_index()[posting_cols + ["_a", "_b"]]
     marked = work.merge(
-        bidir,
+        bidirectional,
         on=posting_cols + ["_a", "_b"],
         how="left",
-        indicator=True
+        indicator=True,
     )
-
-    to_drop = (marked["_merge"] == "both")
-    removed = int(to_drop.sum())
-    out = marked.loc[~to_drop].drop(columns=["_a", "_b", "_dir", "_merge"]).copy()
+    to_drop = marked["_merge"].eq("both")
+    out = marked.loc[~to_drop].drop(columns=["_a", "_b", "_dir", "_merge"])
 
     print("==============================================")
     print("[Bidirectional-swap removal]")
     print(f"Posting id columns: {posting_cols}")
-    print(f"Rows removed: {removed:,}")
+    print(f"Rows removed: {int(to_drop.sum()):,}")
     print(f"Remaining long rows: {len(out):,}")
     print("==============================================")
     return out
 
 
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+def load_margin_table(path: str, encoding: str) -> pd.DataFrame:
+    trends = pd.read_csv(path, encoding=encoding, low_memory=False)
+    required = {"truth", "subs", "year_month", "truth_trend", "subs_trend"}
+    missing = required.difference(trends.columns)
+    if missing:
+        raise ValueError(
+            f"[margin-csv] Missing columns: {sorted(missing)}. "
+            f"Columns={list(trends.columns)}"
+        )
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pred-dir", required=True,
-                    help="Directory containing prediction files, e.g. .../bert_pred_new/pred/2025")
-    ap.add_argument("--pred-glob", default="predictions_2025-*.csv.gz",
-                    help="Glob inside pred-dir (default: predictions_2025-*.csv.gz)")
-    ap.add_argument("--preprocessed-root", required=True,
-                    help="Root directory for preprocessed files, e.g. .../preprocessed_www_new/test/2025")
-    ap.add_argument("--margin-csv", required=True,
-                    help="CSV with columns: truth, subs, year_month, truth_trend, subs_trend, trend_diff")
-    ap.add_argument("--out-fig", default="./posting_margin_ratio_hist_2025.png",
-                    help="Output figure path")
-    ap.add_argument("--drop-bidirectional", action="store_true",
-                    help="Drop bidirectional swaps within the same posting")
-    ap.add_argument("--encoding", default="utf-8")
-    args = ap.parse_args()
+    for col in ["truth", "subs", "year_month"]:
+        trends[col] = trends[col].fillna("").astype(str).str.strip()
+    trends["year_month"] = (
+        trends["year_month"].str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    )
+    trends["truth_trend"] = pd.to_numeric(trends["truth_trend"], errors="coerce")
+    trends["subs_trend"] = pd.to_numeric(trends["subs_trend"], errors="coerce")
 
-    # ---- load trends table & compute margin_ratio ----
-    tr = pd.read_csv(args.margin_csv, encoding=args.encoding, low_memory=False)
+    truth_key = trends["truth"].str.casefold()
+    subs_key = trends["subs"].str.casefold()
+    truth_first = truth_key.lt(subs_key) | (
+        truth_key.eq(subs_key) & trends["truth"].le(trends["subs"])
+    )
 
-    need_tr = {"truth", "subs", "year_month", "truth_trend", "subs_trend"}
-    miss_tr = need_tr - set(tr.columns)
-    if miss_tr:
-        raise ValueError(f"[margin-csv] Missing columns: {miss_tr}. Columns={list(tr.columns)}")
+    # Normalize both legacy directional outputs and new unordered outputs.
+    canonical = pd.DataFrame(
+        {
+            "skill_a": trends["truth"].where(truth_first, trends["subs"]),
+            "skill_b": trends["subs"].where(truth_first, trends["truth"]),
+            "year_month": trends["year_month"],
+            "trend_a": trends["truth_trend"].where(truth_first, trends["subs_trend"]),
+            "trend_b": trends["subs_trend"].where(truth_first, trends["truth_trend"]),
+        }
+    ).drop_duplicates(subset=["skill_a", "skill_b", "year_month"], keep="last")
 
-    # normalize keys
-    for c in ["truth", "subs", "year_month"]:
-        tr[c] = tr[c].astype(str).str.strip()
+    # A single unordered Trends query provides both directional margins.
+    forward = canonical.rename(
+        columns={
+            "skill_a": "truth",
+            "skill_b": "subs",
+            "trend_a": "truth_trend",
+            "trend_b": "subs_trend",
+        }
+    )
+    reverse = canonical.rename(
+        columns={
+            "skill_b": "truth",
+            "skill_a": "subs",
+            "trend_b": "truth_trend",
+            "trend_a": "subs_trend",
+        }
+    )
+    directional = pd.concat([forward, reverse], ignore_index=True)
 
-    # numeric
-    tr["truth_trend"] = pd.to_numeric(tr["truth_trend"], errors="coerce")
-    tr["subs_trend"] = pd.to_numeric(tr["subs_trend"], errors="coerce")
-
-    if "trend_diff" in tr.columns:
-        tr["trend_diff"] = pd.to_numeric(tr["trend_diff"], errors="coerce")
-        diff = tr["trend_diff"]
-    else:
-        diff = tr["subs_trend"] - tr["truth_trend"]
-
-    # avoid division by zero
-    tr = tr.dropna(subset=["truth_trend"]).copy()
-    tr = tr[tr["truth_trend"] != 0].copy()
-
-    tr["margin_ratio"] = (diff / tr["truth_trend"]) * 100.0
-    tr = tr[["truth", "subs", "year_month", "margin_ratio"]].drop_duplicates(
+    zero_or_missing = directional["truth_trend"].isna() | directional["truth_trend"].eq(
+        0
+    )
+    if zero_or_missing.any():
+        print(
+            "[MARGIN] Dropping directional rows with missing/zero truth_trend: "
+            f"{int(zero_or_missing.sum()):,}"
+        )
+    directional = directional.loc[~zero_or_missing].copy()
+    directional["margin_ratio"] = (
+        (directional["subs_trend"] - directional["truth_trend"])
+        / directional["truth_trend"]
+        * 100.0
+    )
+    return directional[["truth", "subs", "year_month", "margin_ratio"]].drop_duplicates(
         subset=["truth", "subs", "year_month"], keep="last"
     )
 
-    # ---- iterate prediction files ----
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--pred-dir",
+        default=DEFAULT_PRED_DIR,
+        help="Directory containing monthly predictions",
+    )
+    parser.add_argument(
+        "--pred-glob",
+        default=DEFAULT_PRED_GLOB,
+        help="Filename glob inside --pred-dir",
+    )
+    parser.add_argument(
+        "--candidate-col",
+        default="substitution",
+        help="Truth-excluded substitute column in prediction files",
+    )
+    parser.add_argument(
+        "--posting-source-col",
+        default="file_path",
+        help="Column paired with row_idx to identify a posting",
+    )
+    parser.add_argument(
+        "--preprocessed-root",
+        default=None,
+        help="Deprecated; current prediction files already contain posting ids",
+    )
+    parser.add_argument(
+        "--margin-csv",
+        default=DEFAULT_MARGIN_CSV,
+        help="CSV containing pair/month Google Trends values",
+    )
+    parser.add_argument("--out-fig", default=DEFAULT_OUT_FIG)
+    parser.add_argument("--drop-bidirectional", action="store_true")
+    parser.add_argument("--encoding", default="utf-8")
+    args = parser.parse_args()
+
+    trends = load_margin_table(args.margin_csv, args.encoding)
     pred_files = sorted(glob.glob(os.path.join(args.pred_dir, args.pred_glob)))
     if not pred_files:
-        raise FileNotFoundError(f"No pred files matched: {os.path.join(args.pred_dir, args.pred_glob)}")
-
-    all_rows = []
-
-    for pf in pred_files:
-        ym = parse_year_month_from_filename(pf)
-        print(f"[LOAD] {pf} -> year_month={ym}")
-
-        pred = pd.read_csv(
-            pf,
-            compression="gzip" if pf.endswith(".gz") else None,
-            encoding=args.encoding,
-            low_memory=False
+        raise FileNotFoundError(
+            f"No prediction files matched: {os.path.join(args.pred_dir, args.pred_glob)}"
         )
 
-        # required columns
-        for col in ["file", "truth", "pred_top5"]:
-            if col not in pred.columns:
-                raise ValueError(f"[pred] Missing '{col}' in {pf}. Columns={list(pred.columns)}")
+    all_rows = []
+    for pred_path in pred_files:
+        year_month = parse_year_month_from_filename(pred_path)
+        print(f"[LOAD] {pred_path} -> year_month={year_month}")
 
-        pred["year_month"] = ym
-        pred["truth"] = pred["truth"].astype(str).str.strip()
-
-        # group by referenced preprocessed file
-        for fname, block in pred.groupby("file", sort=False):
-            pre_path = os.path.join(args.preprocessed_root, str(fname))
-            if not os.path.exists(pre_path):
-                raise FileNotFoundError(f"[preprocessed] Not found: {pre_path} (from file={fname})")
-
-            block2 = attach_posting_ids(block, pre_path)
-
-            # subs = top-ranked WRONG from pred_top5
-            subs = []
-            for t, x in zip(block2["truth"].tolist(), block2["pred_top5"].tolist()):
-                top_list = safe_parse_topk_list(x)
-                subs.append(pick_top_wrong(t, top_list))
-
-            out = pd.DataFrame({
-                "row_idx": block2["row_idx"].to_numpy(),
-                "file_path": block2["file_path"].astype(str).to_numpy(),
-                "year_month": block2["year_month"].astype(str).to_numpy(),
-                "truth": block2["truth"].astype(str).str.strip().to_numpy(),
-                "subs": pd.Series(subs, dtype="object"),
-            })
-
-            # drop rows with no valid wrong candidate
-            out = out[out["subs"].notna()].copy()
-            out["subs"] = out["subs"].astype(str).str.strip()
-            out = out[out["subs"] != ""].copy()
-
-            # merge margin_ratio
-            out = out.merge(
-                tr,
-                on=["truth", "subs", "year_month"],
-                how="left",
-                validate="many_to_one"
+        header = pd.read_csv(pred_path, nrows=0)
+        required = {
+            "row_idx",
+            "truth",
+            args.candidate_col,
+            args.posting_source_col,
+        }
+        missing = required.difference(header.columns)
+        if missing:
+            raise ValueError(
+                f"[pred] Missing {sorted(missing)} in {pred_path}. "
+                f"Columns={list(header.columns)}"
             )
 
-            out["margin_ratio"] = pd.to_numeric(out["margin_ratio"], errors="coerce")
-            all_rows.append(out)
+        pred = pd.read_csv(
+            pred_path,
+            usecols=sorted(required),
+            compression="gzip" if pred_path.endswith(".gz") else None,
+            encoding=args.encoding,
+            low_memory=False,
+        )
+        truth = pred["truth"].fillna("").astype(str).str.strip()
+        subs = pred[args.candidate_col].fillna("").astype(str).str.strip()
+        posting_source = (
+            pred[args.posting_source_col].fillna("").astype(str).str.strip()
+        )
+        valid = (
+            pred["row_idx"].notna()
+            & posting_source.ne("")
+            & posting_source.str.casefold().ne("nan")
+            & truth.ne("")
+            & subs.ne("")
+            & truth.str.casefold().ne(subs.str.casefold())
+        )
 
-    df = pd.concat(all_rows, ignore_index=True)
+        rows = pd.DataFrame(
+            {
+                "row_idx": pred.loc[valid, "row_idx"],
+                "posting_source": posting_source[valid],
+                "year_month": year_month,
+                "truth": truth[valid],
+                "subs": subs[valid],
+            }
+        ).reset_index(drop=True)
+        print(
+            f"[PAIR] valid={len(rows):,}, dropped={len(pred) - len(rows):,}, "
+            f"candidate_col={args.candidate_col}"
+        )
 
-    posting_cols = ["row_idx", "file_path"]
+        rows = rows.merge(
+            trends,
+            on=["truth", "subs", "year_month"],
+            how="left",
+            validate="many_to_one",
+        )
+        rows["margin_ratio"] = pd.to_numeric(rows["margin_ratio"], errors="coerce")
+        all_rows.append(rows)
 
-    # ---- optional: drop bidirectional swaps ----
+    long_df = pd.concat(all_rows, ignore_index=True)
+    matched = int(long_df["margin_ratio"].notna().sum())
+    print(
+        f"[MERGE] Trends matched: {matched:,}/{len(long_df):,} rows "
+        f"({matched / len(long_df) * 100.0 if len(long_df) else 0.0:.2f}%)"
+    )
+
+    posting_cols = ["row_idx", "posting_source"]
     if args.drop_bidirectional:
-        df = drop_bidirectional(df, posting_cols)
+        long_df = drop_bidirectional(long_df, posting_cols)
 
-    # ---- posting-level aggregation ----
-    df["_pos"] = (df["margin_ratio"] > 0).fillna(False)
-
-    posting = (
-        df.groupby(posting_cols, as_index=False)
-          .agg(
-              has_positive_margin=("_pos", "any"),
-              max_margin_ratio=("margin_ratio", "max")
-          )
+    long_df["_pos"] = long_df["margin_ratio"].gt(0).fillna(False)
+    posting = long_df.groupby(posting_cols, as_index=False).agg(
+        has_positive_margin=("_pos", "any"),
+        max_margin_ratio=("margin_ratio", "max"),
     )
 
     total = len(posting)
-    pos = int(posting["has_positive_margin"].sum())
-    pct = (pos / total * 100.0) if total > 0 else 0.0
-
+    positive = int(posting["has_positive_margin"].sum())
+    percentage = positive / total * 100.0 if total else 0.0
     print("==============================================")
-    print("Posting-level positive-margin substitution rate (2025)")
+    print("Posting-level positive-margin substitution rate")
     print(f"Posting id = {posting_cols}")
     print(f"Total postings: {total:,}")
-    print(f"Postings with >=1 positive-margin substitution: {pos:,} ({pct:.2f}%)")
+    print(
+        "Postings with >=1 positive-margin substitution: "
+        f"{positive:,} ({percentage:.2f}%)"
+    )
     print("==============================================")
 
-    # ---- plot histogram (posting-level max, positive only) ----
-    plot_vals = posting.loc[posting["max_margin_ratio"] > 0, "max_margin_ratio"].dropna()
-    if plot_vals.empty:
+    plot_values = posting.loc[
+        posting["max_margin_ratio"] > 0, "max_margin_ratio"
+    ].dropna()
+    if plot_values.empty:
         print("[WARN] No positive max_margin_ratio values to plot.")
         return
 
-    # log bins
-    min_val = 1e-1
-    max_val = float(plot_vals.max())
-    if max_val <= min_val:
+    min_value = 1e-1
+    max_value = float(plot_values.max())
+    if max_value <= min_value:
         bins = 20
         use_log = False
     else:
-        bins = np.logspace(np.log10(min_val), np.log10(max_val), 40)
+        bins = np.logspace(np.log10(min_value), np.log10(max_value), 40)
         use_log = True
 
     sns.set(style="ticks", font_scale=1.4)
     plt.figure(figsize=(8, 5))
-
     sns.histplot(
-        plot_vals,
+        plot_values,
         bins=bins,
         color="#55C0C2",
         edgecolor="#333333",
         linewidth=0.6,
         alpha=0.85,
     )
-
     if use_log:
         plt.xscale("log")
     plt.margins(x=0)
     plt.grid(False)
-
-    plt.xlabel("Exposure Gain (%)", fontsize=22)
-    plt.ylabel("Count", fontsize=22)
-
+    plt.xlabel("Potential Candidate-Pool Gain (%)", fontsize=20)
+    plt.ylabel("Count", fontsize=20)
     plt.tight_layout()
     ensure_dir(os.path.dirname(os.path.abspath(args.out_fig)))
     plt.savefig(args.out_fig, dpi=300, bbox_inches="tight")
     plt.close()
-
     print(f"[OK] Saved histogram -> {args.out_fig}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-    
-    
-"""
-python3 get_graph.py \
-  --pred-dir /home/jovyan/LEM_data2/data/bert_pred_new/pred/2025 \
-  --preprocessed-root /home/jovyan/LEM_data2/data/preprocessed_www_new/test/2025 \
-  --margin-csv ./counts_by_pair_with_trends_monthly.csv \
-  --drop-bidirectional \
-  --out-fig ./posting_margin_ratio_hist_2025.png
-"""

@@ -2,7 +2,7 @@
 
 import os
 
-CACHE_DIR = "/home/jovyan/LEM_data2/hf_cache"
+CACHE_DIR = os.environ.get("HF_CACHE_DIR", "/home/jovyan/LEM_data2/hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 os.environ["HF_HOME"] = CACHE_DIR
@@ -261,6 +261,7 @@ def compute_sv_batch(
     tokenizer,
     model,
     sent_batch: int,
+    max_len: int,
     device: str,
 ):
     out = []
@@ -277,7 +278,7 @@ def compute_sv_batch(
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=MAX_LEN
+                max_length=max_len
             ).to(device)
             outputs_o = model(
                 **enc_o,
@@ -291,7 +292,7 @@ def compute_sv_batch(
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=MAX_LEN
+                max_length=max_len
             ).to(device)
             outputs_p = model(
                 **enc_p,
@@ -350,6 +351,7 @@ def evaluate_one_method_on_df(
     tokenizer,
     model,
     window_size: int,
+    max_len: int,
     sent_batch: int,
     anchor_search_radius: int,
     debug_fail_reason: bool = False,
@@ -394,7 +396,7 @@ def evaluate_one_method_on_df(
             masked=masked,
             tokenizer=tokenizer,
             window_size=window_size,
-            max_len=MAX_LEN,
+            max_len=max_len,
             anchor_search_radius=anchor_search_radius,
         )
         if k_loc < 0:
@@ -412,7 +414,7 @@ def evaluate_one_method_on_df(
             masked=masked,
             tokenizer=tokenizer,
             window_size=window_size,
-            max_len=MAX_LEN,
+            max_len=max_len,
             anchor_search_radius=anchor_search_radius,
         )
         if fill_loc < 0:
@@ -449,6 +451,7 @@ def evaluate_one_method_on_df(
             tokenizer=tokenizer,
             model=model,
             sent_batch=sent_batch,
+            max_len=max_len,
             device=device,
         )
 
@@ -615,6 +618,7 @@ def process_one_month(ym: str, csv_path: str, args, tokenizer, model, device: st
             tokenizer=tokenizer,
             model=model,
             window_size=args.window_size,
+            max_len=args.max_len,
             sent_batch=args.sent_batch,
             anchor_search_radius=args.anchor_search_radius,
             debug_fail_reason=(args.debug_fail_reason or args.debug),
@@ -663,6 +667,7 @@ def split_round_robin(items: List[Tuple[str, str]], n: int) -> List[List[Tuple[s
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input-glob", default=DEFAULT_INPUT_GLOB)
+    ap.add_argument("--max-len", type=int, default=MAX_LEN)
     ap.add_argument("--llama-ckpt", default=DEFAULT_LLAMA_CHECKPOINT)
     ap.add_argument("--cache-dir", default=CACHE_DIR)
     ap.add_argument("--window-size", type=int, default=WINDOW_SIZE)

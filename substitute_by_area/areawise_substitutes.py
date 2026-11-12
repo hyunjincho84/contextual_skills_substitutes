@@ -11,19 +11,17 @@ Input:
 
 Each input file must contain at least:
 - row_idx
+- a source-file identifier such as preprocessed_file_path
 - soc_2_name
 - truth
-- pred_top5
+- substitution (or another column selected with --candidate-col)
 - (optional) year
 
 Core idea (count-based, post-normalized "most-sub"):
 1) Filter rows where truth == target_skill.
-2) For each occurrence row, pick exactly ONE "most-sub":
-   - use top1 from pred_top5
-   - if top1 == truth and top2 exists, use top2
-   - if no valid substitute remains, skip that row
-3) For each posting: n_occ = count of truth occurrences within (row_idx, soc_2_name, truth)
-4) For each posting: cnt = count of chosen substitute within (row_idx, soc_2_name, truth, substitute)
+2) For each occurrence row, use the explicit truth-excluded substitution column.
+3) Identify a posting by (source-file identifier, row_idx).
+4) Within each posting, count target occurrences and chosen substitutes.
 5) Post weight = cnt / n_occ
 6) Aggregate by soc_2_name: total_weight = sum(post weight)
 7) Return Top-K substitutes per soc_2_name.
@@ -107,12 +105,19 @@ def pick_most_sub(pred_top5: str, truth_lower: str) -> Optional[str]:
 def topk_substitutes_by_soc2_postnormalized(
     df: pd.DataFrame,
     target_skill: str,
+    candidate_col: str = "substitution",
     topk_per_soc2: int = 5,
 ) -> pd.DataFrame:
     """
     Post-normalized most-sub counting, aggregated by soc_2_name.
     """
-    required = {"row_idx", "soc_2_name", "truth", "pred_top5"}
+    required = {
+        "__posting_source",
+        "row_idx",
+        "soc_2_name",
+        "truth",
+        candidate_col,
+    }
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -128,15 +133,15 @@ def topk_substitutes_by_soc2_postnormalized(
     if df_t.empty:
         raise ValueError(f"No rows found for target skill: {target_skill}")
 
-    # 2) Pick one "most-sub" per row
+    # 2) Use the explicit truth-excluded substitute for each occurrence.
     picks = []
     for _, r in df_t.iterrows():
-        sub = pick_most_sub(r.get("pred_top5"), t_low)
-        if sub is None:
-            continue
-        if normalize_text(sub) == t_low:
+        raw_sub = r.get(candidate_col, "")
+        sub = str(raw_sub).strip() if pd.notna(raw_sub) else ""
+        if not sub or normalize_text(sub) == t_low:
             continue
         picks.append({
+            "__posting_source": r["__posting_source"],
             "row_idx": r["row_idx"],
             "soc_2_name": r["soc_2_name"],
             "truth": r["truth"],          # keep original casing if any
@@ -153,21 +158,23 @@ def topk_substitutes_by_soc2_postnormalized(
 
     pick_df = pd.DataFrame(picks)
 
-    # 3) n_occ per posting: count of truth occurrences within (row_idx, soc_2_name, truth)
+    posting_keys = ["__posting_source", "row_idx", "soc_2_name", "truth"]
+
+    # 3) n_occ per posting: count target occurrences within a source row.
     occ_count = (
-        df_t.groupby(["row_idx", "soc_2_name", "truth"], dropna=False)
+        df_t.groupby(posting_keys, dropna=False)
             .size().rename("n_occ").reset_index()
     )
 
-    # 4) cnt per posting: count of picked substitute within (row_idx, soc_2_name, truth, substitute)
+    # 4) cnt per posting: count each selected substitute within the same source row.
     post_counts = (
-        pick_df.groupby(["row_idx", "soc_2_name", "truth", "substitute"], dropna=False)
+        pick_df.groupby(posting_keys + ["substitute"], dropna=False)
                .size().rename("cnt").reset_index()
     )
 
     # 5) post weight = cnt / n_occ
     post_weights = (
-        post_counts.merge(occ_count, on=["row_idx", "soc_2_name", "truth"], how="left")
+        post_counts.merge(occ_count, on=posting_keys, how="left")
                    .assign(weight=lambda x: x["cnt"] / x["n_occ"].clip(lower=1))
     )
 
@@ -209,6 +216,10 @@ def parse_args():
                     help="Target truth skill to analyze (e.g., python)")
     ap.add_argument("--out", required=True,
                     help="Output CSV path")
+    ap.add_argument("--candidate-col", default="substitution",
+                    help="Truth-excluded substitute column in the prediction files")
+    ap.add_argument("--posting-source-col", default="preprocessed_file_path",
+                    help="Column identifying the source file in which row_idx is defined")
     ap.add_argument("--topk-per-soc2", type=int, default=5,
                     help="Top-K substitutes per soc_2_name")
     ap.add_argument("--years", nargs="*", default=None,
@@ -230,7 +241,15 @@ def main():
         if not files:
             raise FileNotFoundError("After --years filtering, no files remain.")
 
-    req_cols = ["row_idx", "soc_2_name", "truth", "pred_top5", "year", "file"]
+    req_cols = [
+        "row_idx",
+        "soc_2_name",
+        "truth",
+        args.candidate_col,
+        args.posting_source_col,
+        "year",
+        "file",
+    ]
 
     dfs = []
     for fp in tqdm(files, desc="Loading prediction files", unit="file"):
@@ -248,6 +267,21 @@ def main():
                 df["year"] = m.group(1) if m else None
             if "file" not in df.columns:
                 df["file"] = os.path.basename(fp)
+            if args.candidate_col not in df.columns:
+                raise ValueError(f"missing candidate column: {args.candidate_col}")
+
+            fallback_source = fp + "::" + df["file"].fillna("").astype(str)
+            if args.posting_source_col in df.columns:
+                posting_source = (
+                    df[args.posting_source_col].fillna("").astype(str).str.strip()
+                )
+                posting_source = posting_source.where(
+                    posting_source.ne(""),
+                    fallback_source,
+                )
+            else:
+                posting_source = fallback_source
+            df["__posting_source"] = posting_source
 
             dfs.append(df)
         except Exception as e:
@@ -261,6 +295,7 @@ def main():
     out = topk_substitutes_by_soc2_postnormalized(
         big,
         target_skill=args.target_skill,
+        candidate_col=args.candidate_col,
         topk_per_soc2=args.topk_per_soc2,
     )
 

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import argparse
 import os, sys, json, random, glob, math
 from typing import List
 
@@ -7,7 +8,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset, get_worker_info
 from transformers import BertTokenizer
 from tqdm import tqdm
 
@@ -18,45 +19,8 @@ sys.path.insert(0, MODEL_DIR)
 from model import BERTForSkillPrediction
 
 
-# ─── Config ───────────────────────────────────────────────────────────────
-BASE_DATA_DIR  = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
-DATA_ROOT      = os.environ.get("DATA_ROOT", os.path.join(BASE_DATA_DIR, "preprocessed_www_new"))
-TRAIN_DIR      = os.path.join(DATA_ROOT, "train")
-VOCAB_PATH     = os.path.join(DATA_ROOT, "skill2idx.json")
-
-MODEL_NAME     = os.environ.get("BERT_MODEL_NAME", os.path.join(BASE_DATA_DIR, "bert_pretrained"))
-CKPT_DIR       = os.environ.get("CKPT_DIR", os.path.join(BASE_DATA_DIR, "checkpoints(www)_new"))
-BEST_MODEL_PT  = os.path.join(CKPT_DIR, "best_model.pt")
-
-OUT_DIR        = os.environ.get("SAE_OUT_DIR", os.path.join(BASE_DATA_DIR, "sae_layerwise_out_8192"))
-
-MAX_LEN        = 512
-BATCH_SIZE     = 256
-NUM_WORKERS    = 8
-PIN_MEMORY     = True
-SEED           = 42
-DEVICE         = "cuda"
-
-# SAE hyperparams
-SAE_HIDDEN     = 4096
-SAE_EPOCHS     = 3
-SAE_LR         = 1e-4
-L1             = 1e-3
-L2             = 1e-4
-
-USE_AMP        = True
-AMP_DTYPE      = torch.bfloat16   # A100 최적
-
-TEXT_COL       = "masked_sentence"
-
-
-# ─── Global CUDA tuning ───────────────────────────────────────────────────
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-
 # ─── Utils ────────────────────────────────────────────────────────────────
-def set_seed(seed: int = 42):
+def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -65,8 +29,60 @@ def set_seed(seed: int = 42):
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
-def iter_train_files(train_dir: str) -> List[str]:
-    return sorted(glob.glob(os.path.join(train_dir, "[0-9]"*4, "preprocessed_*.csv.gz")))
+def iter_train_files(train_pattern: str) -> List[str]:
+    return sorted(glob.glob(train_pattern))
+
+def parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected true/false, got: {value}")
+
+def parse_layers(value: str) -> List[int]:
+    if "-" in value:
+        start, end = value.split("-", maxsplit=1)
+        layers = list(range(int(start), int(end) + 1))
+    else:
+        layers = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not layers or any(layer < 1 or layer > 12 for layer in layers):
+        raise argparse.ArgumentTypeError("layers must be within 1..12")
+    return layers
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train one sparse autoencoder per selected BERT layer."
+    )
+    parser.add_argument("--train-pattern", required=True)
+    parser.add_argument("--total-samples", required=True, type=int)
+    parser.add_argument("--vocab-path", required=True)
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--best-model-pt", required=True)
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--text-col", required=True)
+    parser.add_argument("--layers", required=True, type=parse_layers)
+    parser.add_argument("--max-len", required=True, type=int)
+    parser.add_argument("--batch-size", required=True, type=int)
+    parser.add_argument("--num-workers", required=True, type=int)
+    parser.add_argument("--pin-memory", required=True, type=parse_bool)
+    parser.add_argument("--persistent-workers", required=True, type=parse_bool)
+    parser.add_argument("--prefetch-factor", required=True, type=int)
+    parser.add_argument("--shuffle-files", required=True, type=parse_bool)
+    parser.add_argument("--shuffle-rows", required=True, type=parse_bool)
+    parser.add_argument("--drop-last", required=True, type=parse_bool)
+    parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--device", required=True)
+    parser.add_argument("--sae-hidden", required=True, type=int)
+    parser.add_argument("--sae-epochs", required=True, type=int)
+    parser.add_argument("--sae-lr", required=True, type=float)
+    parser.add_argument("--l1", required=True, type=float)
+    parser.add_argument("--l2", required=True, type=float)
+    parser.add_argument("--use-amp", required=True, type=parse_bool)
+    parser.add_argument("--amp-dtype", required=True, choices=["bf16", "fp16"])
+    parser.add_argument("--allow-tf32", required=True, type=parse_bool)
+    parser.add_argument("--fused-optimizer", required=True, type=parse_bool)
+    return parser.parse_args()
 
 
 # ─── Dataset (masked_sentence 전체 사용) ───────────────────────────────────
@@ -77,9 +93,9 @@ class MaskedSentenceDataset(Dataset):
     - [MASK] 포함 여부로 필터링하지 않고, masked_sentence 컬럼 전체 사용
       (전제: 이 컬럼은 이미 마스킹된 문장들로 구성)
     """
-    def __init__(self, csv_path: str):
-        df = pd.read_csv(csv_path, compression="gzip", usecols=[TEXT_COL])
-        self.sentences = df[TEXT_COL].dropna().astype(str).tolist()
+    def __init__(self, csv_path: str, text_col: str):
+        df = pd.read_csv(csv_path, compression="gzip", usecols=[text_col])
+        self.sentences = df[text_col].dropna().astype(str).tolist()
 
     def __len__(self):
         return len(self.sentences)
@@ -88,15 +104,43 @@ class MaskedSentenceDataset(Dataset):
         return self.sentences[idx]
 
 
+class StreamingMaskedSentenceDataset(IterableDataset):
+    """Stream many CSV files through one DataLoader instead of one loader per file."""
+
+    def __init__(self, files, text_col, shuffle_files, shuffle_rows, seed):
+        self.files = list(files)
+        self.text_col = text_col
+        self.shuffle_files = shuffle_files
+        self.shuffle_rows = shuffle_rows
+        self.seed = seed
+
+    def __iter__(self):
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        num_workers = worker.num_workers if worker is not None else 1
+        rng = random.Random(self.seed + worker_id)
+
+        files = self.files[worker_id::num_workers]
+        if self.shuffle_files:
+            rng.shuffle(files)
+
+        for csv_path in files:
+            frame = pd.read_csv(csv_path, compression="gzip", usecols=[self.text_col])
+            sentences = frame[self.text_col].dropna().astype(str).tolist()
+            if self.shuffle_rows:
+                rng.shuffle(sentences)
+            yield from sentences
+
+
 # ─── Collate: batch-tokenize ──────────────────────────────────────────────
-def make_collate_fn(tokenizer: BertTokenizer):
+def make_collate_fn(tokenizer: BertTokenizer, max_len: int):
     def collate(batch):
         # batch는 sentence(str) 리스트
         enc = tokenizer(
             batch,
             padding="max_length",
             truncation=True,
-            max_length=MAX_LEN,
+            max_length=max_len,
             return_tensors="pt",
         )
         input_ids = enc["input_ids"]           # (B, T)
@@ -139,11 +183,11 @@ class SparseAutoencoder(nn.Module):
         return f, xhat
 
 
-def sae_loss(x, xhat, f):
+def sae_loss(x, xhat, f, l1: float, l2: float):
     return (
         F.mse_loss(xhat, x)
-        + L1 * f.abs().mean()
-        + L2 * f.pow(2).mean()
+        + l1 * f.abs().mean()
+        + l2 * f.pow(2).mean()
     )
 
 
@@ -172,104 +216,176 @@ def forward_until_layer(bert, input_ids, attention_mask, layer: int):
 
 
 # ─── Train SAE per layer ──────────────────────────────────────────────────
-def train_sae_one_layer(layer: int, bert, tokenizer, files: List[str]):
+def train_sae_layers(bert, tokenizer, files: List[str], args):
+    """Train all requested layer SAEs from one shared full-BERT forward pass."""
+    saes = {}
+    optimizers = {}
+    best_losses = {layer: float("inf") for layer in args.layers}
+    for layer in args.layers:
+        layer_dir = os.path.join(args.out_dir, f"layer_{layer:02d}")
+        ensure_dir(layer_dir)
+        sae = SparseAutoencoder(
+            d_in=bert.config.hidden_size,
+            d_hidden=args.sae_hidden,
+        ).to(args.device)
+        saes[layer] = sae
+        optimizers[layer] = torch.optim.AdamW(
+            sae.parameters(), lr=args.sae_lr, fused=args.fused_optimizer
+        )
 
-    layer_dir = os.path.join(OUT_DIR, f"layer_{layer:02d}")
-    ensure_dir(layer_dir)
+    collate_fn = make_collate_fn(tokenizer, args.max_len)
 
-    sae = SparseAutoencoder(
-        d_in=bert.config.hidden_size,
-        d_hidden=SAE_HIDDEN
-    ).to(DEVICE)
+    for ep in range(args.sae_epochs):
+        for sae in saes.values():
+            sae.train()
+        total_losses = {layer: 0.0 for layer in args.layers}
+        total_n = 0
 
-    opt = torch.optim.AdamW(sae.parameters(), lr=SAE_LR, fused=True)
+        print(
+            f"\n[SAE] Layers {args.layers[0]:02d}-{args.layers[-1]:02d} | "
+            f"Epoch {ep+1}/{args.sae_epochs}"
+        )
+        ds = StreamingMaskedSentenceDataset(
+            files=files,
+            text_col=args.text_col,
+            shuffle_files=args.shuffle_files,
+            shuffle_rows=args.shuffle_rows,
+            seed=args.seed + ep * 100_000,
+        )
+        loader_kwargs = {
+            "batch_size": args.batch_size,
+            "num_workers": args.num_workers,
+            "pin_memory": args.pin_memory,
+            "collate_fn": collate_fn,
+            "drop_last": args.drop_last,
+        }
+        if args.num_workers > 0:
+            # The loader lives for one epoch; workers are shut down cleanly afterward.
+            loader_kwargs["persistent_workers"] = False
+            loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        loader = DataLoader(ds, **loader_kwargs)
 
-    best_loss = float("inf")
-    collate_fn = make_collate_fn(tokenizer)
-
-    for ep in range(SAE_EPOCHS):
-        sae.train()
-        random.shuffle(files)
-        total_loss, total_n = 0.0, 0
-
-        print(f"\n[SAE] Layer {layer:02d} | Epoch {ep+1}/{SAE_EPOCHS}")
-
-        for fp in tqdm(files, desc="Files", unit="file"):
-            ds = MaskedSentenceDataset(fp)
-            if len(ds) == 0:
+        if args.drop_last:
+            total_batches = args.total_samples // args.batch_size
+        else:
+            total_batches = math.ceil(args.total_samples / args.batch_size)
+        progress = tqdm(
+            loader,
+            total=total_batches,
+            desc=f"Epoch {ep+1}/{args.sae_epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+        for input_ids, attn_mask, mask_idx in progress:
+            if input_ids.numel() == 0:
                 continue
 
-            loader = DataLoader(
-                ds,
-                batch_size=BATCH_SIZE,
-                shuffle=True,
-                num_workers=NUM_WORKERS,
-                pin_memory=PIN_MEMORY,
-                persistent_workers=True,
-                prefetch_factor=4,
-                collate_fn=collate_fn,
-                drop_last=False,
-            )
+            input_ids = input_ids.to(args.device, non_blocking=True)
+            attn_mask = attn_mask.to(args.device, non_blocking=True)
+            mask_idx = mask_idx.to(args.device, non_blocking=True)
+            amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+            device_type = torch.device(args.device).type
 
-            for input_ids, attn_mask, mask_idx in loader:
-                if input_ids.numel() == 0:
-                    continue
+            with torch.no_grad(), torch.autocast(
+                device_type, dtype=amp_dtype, enabled=args.use_amp
+            ):
+                hidden_states = bert(
+                    input_ids=input_ids,
+                    attention_mask=attn_mask,
+                    output_hidden_states=True,
+                    return_dict=True,
+                ).hidden_states
 
-                input_ids = input_ids.to(DEVICE, non_blocking=True)
-                attn_mask = attn_mask.to(DEVICE, non_blocking=True)
-                mask_idx  = mask_idx.to(DEVICE, non_blocking=True)
-
-                with torch.autocast("cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
-                    h = forward_until_layer(bert, input_ids, attn_mask, layer)
-                    x = h[torch.arange(h.size(0), device=DEVICE), mask_idx]  # (B, H)
-                    f, xhat = sae(x)
-                    loss = sae_loss(x, xhat, f)
-
+            for opt in optimizers.values():
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
+
+            losses = {}
+            with torch.autocast(device_type, dtype=amp_dtype, enabled=args.use_amp):
+                for layer in args.layers:
+                    h = hidden_states[layer]
+                    x = h[
+                        torch.arange(h.size(0), device=args.device), mask_idx
+                    ]
+                    f, xhat = saes[layer](x)
+                    losses[layer] = sae_loss(x, xhat, f, args.l1, args.l2)
+
+            sum(losses.values()).backward()
+            for opt in optimizers.values():
                 opt.step()
 
-                bs = x.size(0)
-                total_loss += float(loss.item()) * bs
-                total_n += bs
+            bs = input_ids.size(0)
+            total_n += bs
+            for layer, loss in losses.items():
+                total_losses[layer] += float(loss.item()) * bs
 
-        avg_loss = total_loss / max(1, total_n)
-        print(f"avg_loss={avg_loss:.6f} | samples={total_n:,}")
+            progress.set_postfix(samples=f"{total_n:,}", refresh=False)
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(sae.state_dict(), os.path.join(layer_dir, "sae_best.pt"))
-            print(f"🏆 saved best (loss={best_loss:.6f})")
+            del hidden_states, losses
 
-    torch.save(sae.state_dict(), os.path.join(layer_dir, "sae_last.pt"))
-    print("💾 saved last")
+        for layer in args.layers:
+            avg_loss = total_losses[layer] / max(1, total_n)
+            print(f"Layer {layer:02d} | avg_loss={avg_loss:.6f} | samples={total_n:,}")
+            if avg_loss < best_losses[layer]:
+                best_losses[layer] = avg_loss
+                layer_dir = os.path.join(args.out_dir, f"layer_{layer:02d}")
+                torch.save(saes[layer].state_dict(), os.path.join(layer_dir, "sae_best.pt"))
+                print(f"Layer {layer:02d} | saved best (loss={avg_loss:.6f})")
+
+    for layer in args.layers:
+        layer_dir = os.path.join(args.out_dir, f"layer_{layer:02d}")
+        torch.save(saes[layer].state_dict(), os.path.join(layer_dir, "sae_last.pt"))
+        print(f"Layer {layer:02d} | saved last")
 
 
 # ─── Main ────────────────────────────────────────────────────────────────
 def main():
-    ensure_dir(OUT_DIR)
-    set_seed(SEED)
+    args = parse_args()
+    if args.max_len < 1:
+        raise ValueError("--max-len must be >= 1")
+    if args.total_samples < 1:
+        raise ValueError("--total-samples must be >= 1")
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be >= 1")
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must be >= 0")
+    if args.prefetch_factor < 1:
+        raise ValueError("--prefetch-factor must be >= 1")
+    if args.sae_hidden < 1 or args.sae_epochs < 1:
+        raise ValueError("--sae-hidden and --sae-epochs must be >= 1")
+    if args.sae_lr <= 0:
+        raise ValueError("--sae-lr must be > 0")
+    if args.l1 < 0 or args.l2 < 0:
+        raise ValueError("--l1 and --l2 must be >= 0")
+    if args.fused_optimizer and torch.device(args.device).type != "cuda":
+        raise ValueError("--fused-optimizer=true requires a CUDA device")
 
-    tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
+    torch.backends.cuda.matmul.allow_tf32 = args.allow_tf32
+    torch.backends.cudnn.allow_tf32 = args.allow_tf32
 
-    with open(VOCAB_PATH) as f:
+    ensure_dir(args.out_dir)
+    set_seed(args.seed)
+
+    tokenizer = BertTokenizer.from_pretrained(args.model_name)
+
+    with open(args.vocab_path) as f:
         skill2idx = json.load(f)
 
-    model = BERTForSkillPrediction(MODEL_NAME, num_skills=len(skill2idx)).to(DEVICE)
-    model.load_state_dict(torch.load(BEST_MODEL_PT, map_location="cpu"))
+    model = BERTForSkillPrediction(
+        args.model_name, num_skills=len(skill2idx)
+    ).to(args.device)
+    model.load_state_dict(torch.load(args.best_model_pt, map_location="cpu"))
     model.eval()
 
-    bert = model.bert.to(DEVICE)
+    bert = model.bert.to(args.device)
     bert.eval()
     for p in bert.parameters():
         p.requires_grad_(False)
 
-    files = iter_train_files(TRAIN_DIR)
+    files = iter_train_files(args.train_pattern)
     if not files:
-        raise FileNotFoundError(f"No train files found under: {TRAIN_DIR}")
+        raise FileNotFoundError(f"No train files matched: {args.train_pattern}")
 
-    for layer in range(1, 13):
-        train_sae_one_layer(layer, bert, tokenizer, files)
+    train_sae_layers(bert, tokenizer, files, args)
 
     print("🎉 DONE")
 

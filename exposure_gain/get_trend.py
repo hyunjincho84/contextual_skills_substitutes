@@ -1,217 +1,380 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Query Google Trends for (truth, subs, year_month) pairs with count >= 5
-from counts_by_pair.csv, limited to the period
-'2025-01-01 ~ 2025-06-30', and store monthly averages (Jan–Jun).
-"""
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
+"""Fetch monthly Google Trends proxy values for truth/substitute pairs."""
 
+import argparse
 import os
 import time
-import argparse
+import warnings
+from typing import Callable, Optional, Tuple
+
 import pandas as pd
 from pytrends.request import TrendReq
 from tqdm import tqdm
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 YEAR = "2025"
 TIMEFRAME = f"{YEAR}-01-01 {YEAR}-06-30"
-WAIT_ON_429 = 600  # 10 minutes (seconds)
+WAIT_ON_429 = 600
 
 
-def fetch_pair_monthly(pytrends: TrendReq, truth: str, subs: str,
-                       geo="US", cat=0, gprop="", retries=3, sleep=1.0) -> pd.DataFrame:
-    """Query Jan–Jun 2025 and return monthly average values."""
-    truth, subs = str(truth), str(subs)
-    if not truth.strip() or not subs.strip():
-        return pd.DataFrame()
+class RateLimitError(RuntimeError):
+    """Raised when Google Trends returns HTTP 429."""
 
-    for attempt in range(retries):
+
+def create_trend_client(
+    connect_timeout: float,
+    read_timeout: float,
+    session_retries: int,
+    session_retry_wait: float,
+) -> TrendReq:
+    """Create a client while retrying pytrends' initial cookie request."""
+    last_error: Optional[Exception] = None
+    for attempt in range(1, session_retries + 1):
+        try:
+            return TrendReq(
+                hl="en-US",
+                tz=0,
+                timeout=(connect_timeout, read_timeout),
+            )
+        except Exception as exc:
+            last_error = exc
+            print(
+                "[WARN] Google Trends session initialization failed "
+                f"({attempt}/{session_retries}): {exc}",
+                flush=True,
+            )
+            if attempt < session_retries:
+                wait = session_retry_wait * attempt
+                print(
+                    f"[WAIT] Retrying session initialization in {wait:g} seconds...",
+                    flush=True,
+                )
+                time.sleep(wait)
+
+    raise RuntimeError(
+        "Could not connect to trends.google.com after "
+        f"{session_retries} attempts. Verify outbound network access or "
+        "increase --connect-timeout/--session-retries."
+    ) from last_error
+
+
+def fetch_pair_monthly(
+    pytrends: TrendReq,
+    truth: str,
+    subs: str,
+    client_factory: Callable[[], TrendReq],
+    geo: str = "US",
+    cat: int = 0,
+    gprop: str = "",
+    retries: int = 3,
+    sleep: float = 1.0,
+    timeframe: str = TIMEFRAME,
+) -> Tuple[pd.DataFrame, TrendReq]:
+    """Query one pair and return its monthly values plus the active client."""
+    truth, subs = str(truth).strip(), str(subs).strip()
+    if not truth or not subs:
+        return pd.DataFrame(), pytrends
+
+    for attempt in range(1, retries + 1):
         try:
             pytrends.build_payload(
                 [truth, subs],
-                timeframe=TIMEFRAME,
+                timeframe=timeframe,
                 geo=geo,
                 cat=cat,
-                gprop=gprop
+                gprop=gprop,
             )
-            df = pytrends.interest_over_time()
-            if df is None or df.empty:
-                print(f"[WARN] Empty response for {truth} vs {subs} — restarting session & retrying...")
-                pytrends = TrendReq(hl="en-US", tz=0)
-                time.sleep(10)
+            frame = pytrends.interest_over_time()
+            if frame is None or frame.empty:
+                print(
+                    f"[WARN] Empty response for {truth} vs {subs} "
+                    f"({attempt}/{retries})",
+                    flush=True,
+                )
+                if attempt < retries:
+                    time.sleep(max(0.5, sleep))
+                    pytrends = client_factory()
                 continue
 
-            # Convert date index to column (for groupby)
-            df = df.reset_index()
-
-            # Compute monthly averages
-            df["month"] = df["date"].dt.to_period("M").astype(str)
-            monthly = df.groupby("month")[[truth, subs]].mean().reset_index()
-
-            # Format output
+            frame = frame.reset_index()
+            frame["month"] = frame["date"].dt.to_period("M").astype(str)
+            monthly = frame.groupby("month")[[truth, subs]].mean().reset_index()
             monthly["truth"] = truth
             monthly["subs"] = subs
             monthly["year_month"] = monthly["month"].str.replace("-", "")
             monthly["truth_trend"] = monthly[truth].round(1).astype(float)
             monthly["subs_trend"] = monthly[subs].round(1).astype(float)
-            monthly["trend_diff"] = (monthly["subs_trend"] - monthly["truth_trend"]).round(1)
-
+            monthly["trend_diff"] = (
+                monthly["subs_trend"] - monthly["truth_trend"]
+            ).round(1)
             monthly = monthly[
-                ["truth", "subs", "year_month", "truth_trend", "subs_trend", "trend_diff"]
+                [
+                    "truth",
+                    "subs",
+                    "year_month",
+                    "truth_trend",
+                    "subs_trend",
+                    "trend_diff",
+                ]
             ]
 
-            # Keep Jan–Jun only
-            monthly = monthly[monthly["year_month"].between("202501", "202506")]
-            return monthly
+            start_date, end_date = timeframe.split()
+            start_month = start_date[:7].replace("-", "")
+            end_month = end_date[:7].replace("-", "")
+            monthly = monthly[
+                monthly["year_month"].between(start_month, end_month)
+            ]
+            return monthly, pytrends
 
-        except Exception as e:
-            msg = str(e).lower()
-            if "429" in msg or "too many requests" in msg:
-                # Handled at a higher level
-                raise RuntimeError("429")
-            print(f"[WARN] {truth} vs {subs} failed ({attempt+1}/{retries}): {e}")
-            time.sleep(max(0.5, sleep))
+        except Exception as exc:
+            message = str(exc).lower()
+            if "429" in message or "too many requests" in message:
+                raise RateLimitError("429") from exc
 
-    return pd.DataFrame()
+            print(
+                f"[WARN] {truth} vs {subs} failed "
+                f"({attempt}/{retries}): {exc}",
+                flush=True,
+            )
+            if attempt < retries:
+                time.sleep(max(0.5, sleep))
+                pytrends = client_factory()
+
+    return pd.DataFrame(), pytrends
 
 
-def safe_save(df_list, out_path):
-    """Intermediate save to .partial file."""
-    if not df_list:
+def safe_save(frames, out_path: str, encoding: str) -> None:
+    """Append buffered results to out_path.partial."""
+    if not frames:
         return
-    tmp = pd.concat(df_list, ignore_index=True)
-    tmp_path = out_path + ".partial"
-    mode = "a" if os.path.exists(tmp_path) else "w"
-    header = not os.path.exists(tmp_path)
-    tmp.to_csv(tmp_path, mode=mode, header=header, index=False, encoding="utf-8")
-    print(f"💾 Partial save → {tmp_path}")
-    df_list.clear()
+    partial_path = out_path + ".partial"
+    combined = pd.concat(frames, ignore_index=True)
+    exists = os.path.exists(partial_path)
+    combined.to_csv(
+        partial_path,
+        mode="a" if exists else "w",
+        header=not exists,
+        index=False,
+        encoding=encoding,
+    )
+    print(f"💾 Partial save → {partial_path}", flush=True)
+    frames.clear()
 
 
-def read_done_pairs(path: str) -> set[tuple[str, str]]:
-    """Read (truth, subs) pairs exactly as stored in out_csv or out_csv.partial."""
+def canonical_pair(first: str, second: str) -> tuple[str, str]:
+    """Treat (A, B) and (B, A) as the same Google Trends query."""
+    first = str(first).strip()
+    second = str(second).strip()
+    if (first.casefold(), first) <= (second.casefold(), second):
+        return first, second
+    return second, first
+
+
+def read_done_pairs(path: str, encoding: str) -> set[tuple[str, str]]:
+    """Read completed pairs in canonical order from final/partial output."""
     try:
-        df_done = pd.read_csv(path, usecols=["truth", "subs"])
-        return set(map(tuple, df_done[["truth", "subs"]].astype(str).values))
+        done = pd.read_csv(path, usecols=["truth", "subs"], encoding=encoding)
+        return {
+            canonical_pair(truth, subs)
+            for truth, subs in done[["truth", "subs"]].astype(str).values
+        }
     except Exception:
         return set()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in-csv", required=True,
-                    help="counts_by_pair.csv (truth, subs, year_month, count)")
-    ap.add_argument("--out-csv", required=True,
-                    help="Output CSV (e.g., ./counts_by_pair_with_trends_monthly.csv)")
-    ap.add_argument("--geo", default="US", help="Geographic code (e.g., US, '' = Worldwide)")
-    ap.add_argument("--gprop", default="", help="Search type (news, froogle, youtube, images)")
-    ap.add_argument("--sleep", type=float, default=1.0)
-    ap.add_argument("--retries", type=int, default=3)
-    args = ap.parse_args()
+def merge_partial(out_path: str, encoding: str) -> None:
+    """Append the partial file to the final output and remove the partial."""
+    partial_path = out_path + ".partial"
+    if not os.path.exists(partial_path):
+        return
+    partial = pd.read_csv(partial_path, encoding=encoding)
+    exists = os.path.exists(out_path)
+    partial.to_csv(
+        out_path,
+        mode="a" if exists else "w",
+        header=not exists,
+        index=False,
+        encoding=encoding,
+    )
+    os.remove(partial_path)
+    print(f"✅ Merged partial → {out_path}", flush=True)
 
-    # Load input and build candidate pairs
-    src = pd.read_csv(args.in_csv)
-    for c in ["truth", "subs", "year_month", "count"]:
-        if c not in src.columns:
-            raise ValueError(f"Missing required column: {c}")
 
-    df_filtered = src[src["count"] >= 1][["truth", "subs", "year_month"]].drop_duplicates()
-    pairs_df = df_filtered[["truth", "subs"]].drop_duplicates(ignore_index=True)
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--in-csv",
+        required=True,
+        help="Pair counts CSV: truth, subs, year_month, count",
+    )
+    parser.add_argument("--out-csv", required=True)
+    parser.add_argument("--geo", default="US")
+    parser.add_argument(
+        "--gprop", default="", help="Empty, news, froogle, youtube, or images"
+    )
+    parser.add_argument("--timeframe", default=TIMEFRAME)
+    parser.add_argument("--min-count", type=int, default=1)
+    parser.add_argument("--wait-on-429", type=float, default=WAIT_ON_429)
+    parser.add_argument("--encoding", default="utf-8")
+    parser.add_argument("--sleep", type=float, default=1.0)
+    parser.add_argument("--retries", type=int, default=3,
+                        help="Retries for each truth/substitute pair")
+    parser.add_argument("--connect-timeout", type=float, default=15.0,
+                        help="Connection timeout in seconds (pytrends default is 2)")
+    parser.add_argument("--read-timeout", type=float, default=30.0)
+    parser.add_argument("--session-retries", type=int, default=5,
+                        help="Retries for initial/replacement TrendReq sessions")
+    parser.add_argument("--session-retry-wait", type=float, default=15.0,
+                        help="Base wait; retry n waits base*n seconds")
+    args = parser.parse_args()
+
+    if args.retries < 1 or args.session_retries < 1:
+        parser.error("--retries and --session-retries must be >= 1")
+    if args.connect_timeout <= 0 or args.read_timeout <= 0:
+        parser.error("timeouts must be > 0")
+    if args.sleep < 0 or args.session_retry_wait < 0 or args.wait_on_429 < 0:
+        parser.error("wait/sleep values must be >= 0")
+    if len(args.timeframe.split()) != 2:
+        parser.error("--timeframe must be 'YYYY-MM-DD YYYY-MM-DD'")
+
+    source = pd.read_csv(args.in_csv, encoding=args.encoding)
+    required = {"truth", "subs", "year_month", "count"}
+    missing = required.difference(source.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    canonical = source.apply(
+        lambda row: canonical_pair(row["truth"], row["subs"]),
+        axis=1,
+        result_type="expand",
+    )
+    source[["truth", "subs"]] = canonical
+
+    filtered = source.loc[
+        source["count"] >= args.min_count,
+        ["truth", "subs", "year_month"],
+    ].drop_duplicates()
+    pairs = filtered[["truth", "subs"]].drop_duplicates(ignore_index=True)
     print(
-        f"🎯 count>=5 satisfied: {len(df_filtered)} rows "
-        f"→ {len(pairs_df)} unique pairs (candidates)"
+        f"🎯 count>={args.min_count} satisfied: {len(filtered)} rows "
+        f"→ {len(pairs)} unique pairs (candidates)"
     )
 
     out_path = args.out_csv
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     print(f"📝 output: {out_path} (+ .partial)")
 
-    # Exclude already-processed pairs (exact match)
     done_pairs = set()
     if os.path.exists(out_path):
-        done_pairs |= read_done_pairs(out_path)
+        done_pairs |= read_done_pairs(out_path, args.encoding)
     if os.path.exists(out_path + ".partial"):
-        done_pairs |= read_done_pairs(out_path + ".partial")
+        done_pairs |= read_done_pairs(out_path + ".partial", args.encoding)
 
     if done_pairs:
-        before = len(pairs_df)
-        pairs_df = pairs_df[
-            ~pairs_df.apply(tuple, axis=1).isin(done_pairs)
+        before = len(pairs)
+        pairs = pairs[
+            ~pairs.apply(tuple, axis=1).isin(done_pairs)
         ].reset_index(drop=True)
         print(
             f"✅ already-done pairs: {len(done_pairs):,} "
-            f"→ remaining: {len(pairs_df):,} (from {before:,})"
+            f"→ remaining: {len(pairs):,} (from {before:,})"
         )
     else:
         print("ℹ️ No previously processed pairs found — fetching all candidates.")
 
-    pytrends = TrendReq(hl="en-US", tz=0)
-    results = []
+    if pairs.empty:
+        merge_partial(out_path, args.encoding)
+        print(f"🎉 Completed: {out_path}")
+        return 0
 
-    print(f"🚀 Fetching monthly trends (timeframe={TIMEFRAME}, geo={args.geo})...")
+    def client_factory() -> TrendReq:
+        return create_trend_client(
+            connect_timeout=args.connect_timeout,
+            read_timeout=args.read_timeout,
+            session_retries=args.session_retries,
+            session_retry_wait=args.session_retry_wait,
+        )
+
+    print(
+        "🔌 Initializing Google Trends session "
+        f"(connect_timeout={args.connect_timeout:g}s, "
+        f"read_timeout={args.read_timeout:g}s)...",
+        flush=True,
+    )
+    pytrends = client_factory()
+    results = []
+    empty_pairs = 0
+
+    print(
+        f"🚀 Fetching monthly trends (timeframe={args.timeframe}, geo={args.geo})..."
+    )
 
     try:
-        for i, row in enumerate(tqdm(pairs_df.itertuples(index=False), total=len(pairs_df))):
+        for index, row in enumerate(
+            tqdm(pairs.itertuples(index=False), total=len(pairs)), start=1
+        ):
             truth, subs = str(row.truth), str(row.subs)
-
-            # Auto-assign category (Programming) for R/C/C++
             lower = {truth.lower(), subs.lower()}
-            cat = 31 if any(k in {"r", "c", "c++"} for k in lower) else 0
+            category = 31 if any(k in {"r", "c", "c++"} for k in lower) else 0
 
-            try:
-                monthly_df = fetch_pair_monthly(
-                    pytrends,
-                    truth,
-                    subs,
-                    geo=args.geo,
-                    cat=cat,
-                    gprop=args.gprop,
-                    retries=args.retries,
-                    sleep=args.sleep
+            while True:
+                try:
+                    monthly, pytrends = fetch_pair_monthly(
+                        pytrends,
+                        truth,
+                        subs,
+                        client_factory=client_factory,
+                        geo=args.geo,
+                        cat=category,
+                        gprop=args.gprop,
+                        retries=args.retries,
+                        sleep=args.sleep,
+                        timeframe=args.timeframe,
+                    )
+                    break
+                except RateLimitError:
+                    print(
+                        "⚠️ 429 detected — saving progress and waiting "
+                        f"{args.wait_on_429:g} seconds before retrying the same pair...",
+                        flush=True,
+                    )
+                    safe_save(results, out_path, args.encoding)
+                    time.sleep(args.wait_on_429)
+                    pytrends = client_factory()
+
+            if monthly.empty:
+                empty_pairs += 1
+            else:
+                results.append(monthly)
+
+            if index % 2 == 0:
+                print(
+                    f"[{index}/{len(pairs)}] {truth} vs {subs} "
+                    f"→ {len(monthly)} months"
                 )
-            except RuntimeError as e:
-                if str(e) == "429":
-                    print("⚠️ 429 detected — saving progress and sleeping for 10 minutes...")
-                    safe_save(results, out_path)
-                    results.clear()
-                    time.sleep(WAIT_ON_429)
-                    pytrends = TrendReq(hl="en-US", tz=0)
-                    continue
-                else:
-                    raise
-
-            if not monthly_df.empty:
-                results.append(monthly_df)
-
-            if (i + 1) % 2 == 0:
-                print(f"[{i+1}/{len(pairs_df)}] {truth} vs {subs} → {len(monthly_df)} months")
-
             if len(results) >= 20:
-                safe_save(results, out_path)
+                safe_save(results, out_path, args.encoding)
 
-        # Save remaining results
-        if results:
-            safe_save(results, out_path)
+        safe_save(results, out_path, args.encoding)
 
     except KeyboardInterrupt:
-        print("\n🟥 Ctrl+C detected — saving partial results...")
-        safe_save(results, out_path)
-        print("💾 Safely stopped. Re-run to resume.")
-        return
+        print("\n🟥 Ctrl+C detected — saving partial results...", flush=True)
+        safe_save(results, out_path, args.encoding)
+        print("💾 Safely stopped. Re-run to resume.", flush=True)
+        return 130
 
-    # Merge partial into final output
-    if os.path.exists(out_path + ".partial"):
-        tmp_all = pd.read_csv(out_path + ".partial")
-        mode = "a" if os.path.exists(out_path) else "w"
-        header = not os.path.exists(out_path)
-        tmp_all.to_csv(out_path, mode=mode, header=header, index=False, encoding="utf-8")
-        os.remove(out_path + ".partial")
-        print(f"✅ Merged partial → {out_path}")
-
+    merge_partial(out_path, args.encoding)
+    if empty_pairs:
+        print(
+            f"⚠️ Pairs with no returned Trends rows: {empty_pairs:,}. "
+            "They remain eligible for a future retry."
+        )
     print(f"🎉 Completed: {out_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-    
+    raise SystemExit(main())

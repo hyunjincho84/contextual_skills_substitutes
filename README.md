@@ -108,12 +108,22 @@ Outputs are written under `${BASE_DATA_DIR}` by default:
 - `${BASE_DATA_DIR}/skill2vec_pred_new/pred`
 - `${BASE_DATA_DIR}/condprob_pred_new/pred`
 
-### 5. LLaMA-Based Model SV Scoring
+### 5. Model SV Scoring with LLaMA, Gemma, and Qwen
 
-Compute LLaMA-based semantic-validity scores for the baseline prediction outputs. This creates the `sv_summary_*` files used by GPT sampling.
+Compute semantic-validity scores for the three baseline prediction outputs.
+The default run executes LLaMA, Gemma, and Qwen sequentially, then matches
+BERT/Skill2Vec/Conditional rows and reports judge-specific scores normalized
+to Skill2Vec=1 after excluding training-set pairs.
+Original and substituted sentences are aligned by their identical left and
+right context token IDs. Each context token contributes one cosine similarity,
+while all tokens in each original/substitute skill span are mean-pooled into
+one cosine-similarity unit; the final SV is the uniform mean of those units.
 
 ```bash
 bash commands/run_scoring.sh
+bash commands/run_scoring.sh --judge llama
+bash commands/run_scoring.sh --judge gemma
+bash commands/run_scoring.sh --judge qwen
 ```
 
 Inputs:
@@ -122,14 +132,15 @@ Inputs:
 - `COND_PRED_DIR`, default `${BASE_DATA_DIR}/condprob_pred_new/pred`
 
 Runs:
-- `model_tests/likelihood_based_score/scoring.py`
-- `model_tests/likelihood_based_score/compute_score_mean.py`
+- `model_tests/likelihood_based_score/scoring_other_models.py`
+- `model_tests/likelihood_based_score/get_score_mean_w2v_one.py`
 
 Outputs:
-- `${BASE_DATA_DIR}/bert_pred_new/pred/20*/sv_summary_llama_full_bert_*.csv.gz`
-- `${BASE_DATA_DIR}/skill2vec_pred_new/pred/20*/sv_summary_llama_full_w2v_*.csv.gz`
-- `${BASE_DATA_DIR}/condprob_pred_new/pred/20*/sv_summary_llama_full_conditional_*.csv.gz`
-- Model-level mean SV summaries
+- `${BASE_DATA_DIR}/evaluation_sv/llama/{bert,w2v,conditional}/20*/`
+- `${BASE_DATA_DIR}/evaluation_sv/gemma/{bert,w2v,conditional}/20*/`
+- `${BASE_DATA_DIR}/evaluation_sv/qwen/{bert,w2v,conditional}/20*/`
+- `${BASE_DATA_DIR}/evaluation_sv/all_judges_mean_summary_w2v_one_clean.csv`
+- Judge-specific W2V-normalized distribution plots
 
 ### 6. GPT Sampling And Prediction
 
@@ -168,33 +179,7 @@ Outputs:
 - `${BASE_DATA_DIR}/gpt_samples/20*/*with_sv_llama.csv.gz`
 - GPT-vs-BERT sampled-row mean SV comparison printed by `compute_gpt_score_mean.py`
 
-### 8. Qwen/Gemma Judge Validation
-
-Evaluate prediction outputs with Qwen2.5 and Gemma 2 judge models. Use `debug` for a small run or `full` for full prediction directories.
-
-```bash
-bash commands/eval_gemma_qwen_full.sh debug
-bash commands/eval_gemma_qwen_full.sh full
-```
-
-Inputs:
-- `BERT_PRED_DIR`, default `${BASE_DATA_DIR}/bert_pred_new/pred`
-- `W2V_PRED_DIR`, default `${BASE_DATA_DIR}/skill2vec_pred_new/pred`
-- `COND_PRED_DIR`, default `${BASE_DATA_DIR}/condprob_pred_new/pred`
-- `QWEN_CKPT`, default `Qwen/Qwen2.5-3B-Instruct`
-- `GEMMA_CKPT`, default `google/gemma-2-2b-it`
-
-Runs:
-- `model_tests/likelihood_valid_with_other_models/valid_other_models.py`
-- `model_tests/likelihood_valid_with_other_models/get_mean.py`
-
-Outputs:
-- `${BASE_DATA_DIR}/qwen25_3b_eval_full`
-- `${BASE_DATA_DIR}/gemma2_2b_eval_full`
-- `${BASE_DATA_DIR}/command_outputs/mean_summary_qwen25_gemma_*.csv`
-- `${BASE_DATA_DIR}/command_outputs/logs/eval_gemma_qwen_*.log`
-
-### 9. Top-2 Robustness Analysis
+### 8. Top-2 Robustness Analysis
 
 Generate BERT top-10 predictions, sample substitute variants, score them with LLaMA SV scoring, and summarize mean robustness scores.
 
@@ -211,7 +196,7 @@ Runs:
 
 Outputs include top-10 summaries under `${BASE_DATA_DIR}/bert_pred_new_top10_from_summary`, sampling/scored CSV.GZ files under `${BASE_DATA_DIR}/bert_sampling_variants_from_summary`, mean summaries printed by `get_mean.py`, and logs under `${BASE_DATA_DIR}/command_outputs/logs`.
 
-### 10. Extract Contextual Skill Substitutes
+### 9. Extract Contextual Skill Substitutes
 
 Extract final contextual skill substitutes by SOC2 area and by year.
 
@@ -232,7 +217,7 @@ Outputs:
 - `${BASE_DATA_DIR}/substitute_by_area/subs_python_by_soc2.csv`
 - `${BASE_DATA_DIR}/substitute_by_time/python_yearwise_top5.csv`
 
-### 11. Exposure Gain / Margin Analysis
+### 10. Exposure Gain / Margin Analysis
 
 Combine substitute-pair counts with Google Trends signals and generate posting-level margin visualizations for 2025.
 
@@ -254,7 +239,7 @@ Outputs:
 - `${BASE_DATA_DIR}/exposure_gain/counts_by_pair_with_trends_monthly.csv`
 - `${BASE_DATA_DIR}/exposure_gain/posting_margin_ratio_hist_2025.png`
 
-### 12. Train Sparse Autoencoders
+### 11. Train Sparse Autoencoders
 
 Train layer-wise sparse autoencoders from the fine-tuned BERT representations. These SAE checkpoints are used by the SAE visualization and feature-analysis scripts.
 
@@ -277,7 +262,7 @@ Outputs:
 - `${BASE_DATA_DIR}/sae_layerwise_out_8192/layer_12/sae_best.pt`
 - Each layer directory also contains `sae_last.pt`.
 
-### 13. SAE Representation Visualization
+### 12. SAE Representation Visualization
 
 Build industry- and year-grouped SAE UMAP visualizations and similarity curves.
 
@@ -298,7 +283,7 @@ Outputs:
 - `${BASE_DATA_DIR}/sparse_auto_encoder/python_yearly`
 - UMAP CSV/PNGs, legends/colorbars, feature parquet files, and similarity plots.
 
-### 14. SAE Feature Overlap Analysis
+### 13. SAE Feature Overlap Analysis
 
 Measure and visualize SAE feature overlap across industries and years.
 
@@ -317,7 +302,7 @@ Outputs include overlap heatmaps, per-layer CSVs, overlap graphs, and year-diffe
 - `${BASE_DATA_DIR}/sparse_auto_encoder/python_industry/overlaps`
 - `${BASE_DATA_DIR}/sparse_auto_encoder/python_yearly/overlaps`
 
-### 15. SAE Feature-ID Heatmaps
+### 14. SAE Feature-ID Heatmaps
 
 Visualize unioned top-K SAE feature activations and industry-specific activation structure.
 
@@ -356,7 +341,6 @@ Then run optional analysis pipelines depending on the experiment:
 
 ```bash
 bash commands/run_gpt_scoring.sh
-bash commands/eval_gemma_qwen_full.sh full
 bash commands/run_top2_pipeline.sh full
 bash commands/get_margin.sh
 bash commands/train_sae.sh

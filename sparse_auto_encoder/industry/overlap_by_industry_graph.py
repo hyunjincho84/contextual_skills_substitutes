@@ -43,6 +43,9 @@ def main():
                     help="Line width for individual pair lines")
     ap.add_argument("--lw-mean", type=float, default=3.0,
                     help="Line width for mean trend line")
+    ap.add_argument("--iqr-alpha", type=float, default=0.18,
+                    help="Opacity for the IQR band")
+    ap.add_argument("--dpi", type=int, default=300)
     args = ap.parse_args()
 
     ensure_dir(args.out_dir)
@@ -101,7 +104,7 @@ def main():
     ax = fig.add_subplot(1, 1, 1)
 
     # IQR band first (so lines sit on top)
-    ax.fill_between(layers_sorted, q25.values, q75.values, alpha=0.18, label="IQR (25–75%)")
+    ax.fill_between(layers_sorted, q25.values, q75.values, alpha=args.iqr_alpha, label="IQR (25–75%)")
 
     # spaghetti lines (thin)
     for pair in piv.columns:
@@ -135,7 +138,7 @@ def main():
 
     plt.tight_layout(rect=[0.0, 0.0, 0.80, 1.0])  # leave space for legend
     out_png = os.path.join(args.out_dir, "pairwise_overlap_lines_trend.png")
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.savefig(out_png, dpi=args.dpi, bbox_inches="tight")
     plt.close()
 
     print("[DONE]")

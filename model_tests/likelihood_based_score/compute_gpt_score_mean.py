@@ -1,265 +1,486 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Compare mean SV between GPT-scored rows vs BERT-scored rows on the SAME sampled indices,
-and verify (truth, masked_sentence) equality for matched rows.
+"""Summarize paired BERT/GPT sample scores for four SV judges.
 
-GPT inputs (default):
-  /home/jovyan/LEM_data2/data/gpt_samples/20*/*with_sv_llama.csv.gz
-  required cols: year, file, row_idx, sv_llama
-  optional (for verification): truth, masked_sentence
-
-BERT source (original format):
-  /home/jovyan/LEM_data2/data/bert_pred_new/pred/{year}/<basename(file)>
-  - NO row_idx column (row order is the index)
-  - score column could be: sv_llama or sv (auto-detect)
-  - for verification, expects truth and masked_sentence columns (common in sv_summary files)
-
-Outputs:
-  - GPT: total rows + mean sv_llama
-  - BERT: total matched rows + mean sv(_llama)
-  - Verification report: mismatch counts (+ a few examples)
+The input files are produced by ``scoring_gpt.py`` (BERT judge) and
+``scoring_gpt_other_models.py`` (LLaMA, Gemma, and Qwen judges). For each
+judge, BERT and GPT rows are aligned by the same identity used by
+``get_mean.py``. Summary statistics are computed only on rows for which both
+scores are finite, so every BERT/GPT comparison uses an identical sample.
 """
 
-import os
-import glob
+from __future__ import annotations
+
 import argparse
+import math
+import os
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 
-BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/home/jovyan/LEM_data2/data")
-DEFAULT_GPT_PATTERN = os.path.join(BASE_DATA_DIR, "gpt_samples", "20*", "*with_sv_llama.csv.gz")
-DEFAULT_BERT_BASE   = os.path.join(BASE_DATA_DIR, "bert_pred_new", "pred")
+BASE_DATA_DIR = os.environ.get(
+    "BASE_DATA_DIR", "/home/jovyan/LEM_data3/hyunjincho/LEM"
+)
+DEFAULT_SAMPLE_ROOT = os.environ.get(
+    "GPT_SAMPLINGS_DIR",
+    os.path.join(BASE_DATA_DIR, "predictions_clean", "gpt_samplings"),
+)
+DEFAULT_OTHER_MODELS_ROOT = os.environ.get(
+    "GPT_OTHER_MODELS_SV_ROOT",
+    os.path.join(BASE_DATA_DIR, "evaluation_sv", "gpt_other_models"),
+)
+DEFAULT_OUTPUT_CSV = os.path.join(
+    DEFAULT_OTHER_MODELS_ROOT,
+    "gpt_bert_mean_summary_raw.csv",
+)
+SOURCE_ORDER = ("bert", "gpt")
+JUDGE_ORDER = ("llama", "gemma", "qwen", "bert")
+IDENTITY_COLS = ["row_idx", "truth", "masked_sentence"]
+JUDGE_CONFIGS = {
+    "llama": {"file_tag": "llama", "score_col": "sv_llama"},
+    "gemma": {"file_tag": "gemma", "score_col": "sv_gemma"},
+    "qwen": {"file_tag": "qwen25", "score_col": "sv_qwen25"},
+    "bert": {"file_tag": "bert", "score_col": "sv_bert"},
+}
 
 
-def detect_score_col(cols):
-    """Prefer sv_llama if present, else sv."""
-    if "sv_llama" in cols:
-        return "sv_llama"
-    if "sv" in cols:
-        return "sv"
-    return None
+class RunningStats:
+    """Numerically stable streaming summary, matching ``get_mean.py``."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.mean = 0.0
+        self.m2 = 0.0
+        self.minimum = float("inf")
+        self.maximum = float("-inf")
+
+    def update(self, values: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float64)
+        if values.size == 0:
+            return
+        batch_count = int(values.size)
+        batch_mean = float(values.mean())
+        batch_m2 = float(np.square(values - batch_mean).sum())
+        if self.count == 0:
+            self.count = batch_count
+            self.mean = batch_mean
+            self.m2 = batch_m2
+        else:
+            delta = batch_mean - self.mean
+            combined = self.count + batch_count
+            self.mean += delta * batch_count / combined
+            self.m2 += (
+                batch_m2
+                + delta * delta * self.count * batch_count / combined
+            )
+            self.count = combined
+        self.minimum = min(self.minimum, float(values.min()))
+        self.maximum = max(self.maximum, float(values.max()))
 
 
-def build_bert_path(bert_base: str, year: str, file_rel: str) -> str:
-    # GPT file column example: "2010/sv_summary_llama_full_bert_2010-01.csv.gz"
-    base = os.path.basename(str(file_rel))
-    return os.path.join(bert_base, str(year), base)
+def default_score_path(
+    *,
+    judge: str,
+    source: str,
+    sample_root: str,
+    other_models_root: str,
+) -> str:
+    config = JUDGE_CONFIGS[judge]
+    file_tag = str(config["file_tag"])
+    if judge == "bert":
+        return os.path.join(sample_root, f"{source}_with_sv_bert.csv.gz")
+    return os.path.join(
+        other_models_root,
+        file_tag,
+        f"{source}_with_sv_{file_tag}.csv.gz",
+    )
 
 
-def safe_read_csv_usecols(path: str, cols_wanted):
-    """Read only available columns among cols_wanted."""
-    hdr = pd.read_csv(path, nrows=0)
-    avail = set(hdr.columns)
-    use = [c for c in cols_wanted if c in avail]
-    if not use:
-        return None, avail
-    return pd.read_csv(path, usecols=use), avail
-
-
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--gpt-pattern", type=str, default=DEFAULT_GPT_PATTERN)
-    ap.add_argument("--bert-base", type=str, default=DEFAULT_BERT_BASE)
-    ap.add_argument("--max-mismatch-examples", type=int, default=5)
-    return ap.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    # ----------------------------
-    # 1) Load GPT SV outputs
-    # ----------------------------
-    gpt_files = sorted(glob.glob(args.gpt_pattern))
-    if not gpt_files:
-        raise FileNotFoundError(f"No GPT files matched: {args.gpt_pattern}")
-
-    print("[STEP 1] Loading GPT SV files...")
-    gpt_parts = []
-    gpt_has_truth_mask = True
-
-    for fp in tqdm(gpt_files, desc="GPT"):
-        # 필수 + (가능하면) truth/masked_sentence까지
-        df, avail = safe_read_csv_usecols(
-            fp, ["year", "file", "row_idx", "sv_llama", "truth", "masked_sentence"]
+def resolve_score_paths(
+    args: argparse.Namespace,
+    judge: str,
+) -> Dict[str, str]:
+    paths: Dict[str, str] = {}
+    for source in SOURCE_ORDER:
+        override = getattr(args, f"{judge}_{source}_file")
+        paths[source] = os.path.abspath(
+            override
+            or default_score_path(
+                judge=judge,
+                source=source,
+                sample_root=args.sample_root,
+                other_models_root=args.other_models_root,
+            )
         )
-        if df is None:
-            raise ValueError(f"GPT file missing required cols among year/file/row_idx/sv_llama: {fp}")
+    return paths
 
-        need = {"year", "file", "row_idx", "sv_llama"}
-        if not need.issubset(set(df.columns)):
-            raise ValueError(f"GPT file missing required {need}: {fp} (have={set(df.columns)})")
 
-        if ("truth" not in df.columns) or ("masked_sentence" not in df.columns):
-            gpt_has_truth_mask = False
+def _filter_years(
+    frame: pd.DataFrame,
+    years: Optional[Sequence[str]],
+    path: str,
+) -> pd.DataFrame:
+    if not years:
+        return frame
+    if "year" not in frame.columns:
+        raise ValueError(f"--years requires a year column: {path}")
+    wanted = {str(year) for year in years}
+    numeric = pd.to_numeric(frame["year"], errors="coerce").astype("Int64")
+    return frame.loc[numeric.astype(str).isin(wanted)].copy()
 
-        df["year"] = df["year"].astype(str)
-        df["file"] = df["file"].astype(str)
-        df["row_idx"] = df["row_idx"].astype(int)
-        gpt_parts.append(df)
 
-    gpt_df = pd.concat(gpt_parts, ignore_index=True)
-    gpt_df = gpt_df.dropna(subset=["sv_llama"])
+def _single_metadata_value(
+    frame: pd.DataFrame,
+    column: str,
+    path: str,
+) -> str:
+    if column not in frame.columns:
+        return ""
+    values = sorted(
+        {
+            str(value).strip()
+            for value in frame[column].tolist()
+            if str(value).strip()
+        }
+    )
+    if len(values) > 1:
+        raise ValueError(f"Multiple {column} values in {path}: {values}")
+    return values[0] if values else ""
 
-    gpt_cnt = len(gpt_df)
-    gpt_mean = float(gpt_df["sv_llama"].mean()) if gpt_cnt > 0 else float("nan")
 
-    print(f"[GPT] Rows    : {gpt_cnt:,}")
-    print(f"[GPT] Mean SV : {gpt_mean:.6f}")
+def load_score_frame(
+    *,
+    path: str,
+    source: str,
+    judge: str,
+    years: Optional[Sequence[str]],
+) -> Tuple[pd.DataFrame, str]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"[{judge}/{source}] score file not found: {path}")
 
-    if not gpt_has_truth_mask:
-        print("[WARN] GPT files do NOT consistently contain truth/masked_sentence. "
-              "Verification will be PARTIAL or SKIPPED for those rows.")
+    config = JUDGE_CONFIGS[judge]
+    score_col = str(config["score_col"])
+    header = pd.read_csv(path, nrows=0)
+    required = set(IDENTITY_COLS + [score_col])
+    if years:
+        required.add("year")
+    missing = sorted(required.difference(header.columns))
+    if missing:
+        raise ValueError(
+            f"[{judge}/{source}] missing columns {missing}: {path}"
+        )
 
-    # group GPT rows by (year, file)
-    # also keep mapping row_idx -> (truth, masked_sentence) if available
-    gpt_groups = {}
-    gpt_verify_maps = {}  # (year,file) -> dict[row_idx] = (truth, masked_sentence)
-    for (y, f), sub in gpt_df.groupby(["year", "file"]):
-        key = (str(y), str(f))
-        gpt_groups[key] = sub["row_idx"].tolist()
+    optional = [
+        column
+        for column in (
+            "year",
+            "prediction_source",
+            "judge_name",
+            "judge_checkpoint",
+        )
+        if column in header.columns
+    ]
+    usecols = list(dict.fromkeys(IDENTITY_COLS + [score_col] + optional))
+    frame = pd.read_csv(
+        path,
+        usecols=usecols,
+        keep_default_na=False,
+        low_memory=False,
+    )
+    frame = _filter_years(frame, years, path)
 
-        if ("truth" in sub.columns) and ("masked_sentence" in sub.columns):
-            m = {}
-            # 문자열 normalize
-            for _, r in sub.iterrows():
-                ri = int(r["row_idx"])
-                t = "" if pd.isna(r.get("truth", "")) else str(r.get("truth", ""))
-                ms = "" if pd.isna(r.get("masked_sentence", "")) else str(r.get("masked_sentence", ""))
-                m[ri] = (t, ms)
-            gpt_verify_maps[key] = m
+    metadata_source = _single_metadata_value(
+        frame, "prediction_source", path
+    )
+    if metadata_source and metadata_source != source:
+        raise ValueError(
+            f"[{judge}/{source}] prediction_source={metadata_source!r}: {path}"
+        )
+    metadata_judge = _single_metadata_value(frame, "judge_name", path)
+    expected_judge = str(config["file_tag"])
+    if metadata_judge and metadata_judge != expected_judge:
+        raise ValueError(
+            f"[{judge}/{source}] judge_name={metadata_judge!r}, "
+            f"expected {expected_judge!r}: {path}"
+        )
+    checkpoint = _single_metadata_value(frame, "judge_checkpoint", path)
 
-    # ----------------------------
-    # 2) Load BERT SV outputs and match by row_idx (row order)
-    # ----------------------------
-    print("\n[STEP 2] Loading BERT SV files (match by GPT row_idx via row order) + verification...")
+    result = frame.loc[:, IDENTITY_COLS + [score_col]].copy()
+    return result.rename(columns={score_col: f"{source}_sv"}), checkpoint
 
-    bert_sum = 0.0
-    bert_cnt = 0
-    used_score_col = None
 
-    miss_files = 0
-    miss_rows = 0
+def match_sources(
+    *,
+    judge: str,
+    frames: Dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Align BERT and GPT rows exactly, including duplicate occurrences."""
+    bert = frames["bert"]
+    gpt = frames["gpt"]
+    if (
+        len(bert) == len(gpt)
+        and bert[IDENTITY_COLS].equals(gpt[IDENTITY_COLS])
+    ):
+        matched = bert[IDENTITY_COLS + ["bert_sv"]].copy()
+        matched["gpt_sv"] = gpt["gpt_sv"].to_numpy()
+        return matched
 
-    # verification stats
-    verify_attempted = 0
-    verify_matched = 0
-    verify_mismatch = 0
-    mismatch_examples = []
+    match_cols = IDENTITY_COLS + ["_identity_occurrence"]
+    working: Dict[str, pd.DataFrame] = {}
+    for source in SOURCE_ORDER:
+        frame = frames[source].copy()
+        frame["_identity_occurrence"] = frame.groupby(
+            IDENTITY_COLS,
+            sort=False,
+            dropna=False,
+        ).cumcount()
+        working[source] = frame
 
-    for (year, file_rel), idxs in tqdm(gpt_groups.items(), desc="BERT"):
-        bert_path = build_bert_path(args.bert_base, year, file_rel)
-        if not os.path.exists(bert_path):
-            miss_files += 1
-            miss_rows += len(idxs)
-            continue
+    matched = working["bert"].merge(
+        working["gpt"][match_cols + ["gpt_sv"]],
+        on=match_cols,
+        how="inner",
+        validate="one_to_one",
+        sort=False,
+    )
+    source_counts = {source: len(frames[source]) for source in SOURCE_ORDER}
+    if any(len(matched) != count for count in source_counts.values()):
+        raise ValueError(
+            f"[{judge}] BERT/GPT identity mismatch: "
+            f"matched={len(matched):,}, source_counts={source_counts}"
+        )
+    return matched
 
-        hdr = pd.read_csv(bert_path, nrows=0)
-        cols = set(hdr.columns)
 
-        score_col = detect_score_col(cols)
-        if score_col is None:
-            miss_files += 1
-            miss_rows += len(idxs)
-            continue
-        if used_score_col is None:
-            used_score_col = score_col
+def compute_paired_stats(
+    matched: pd.DataFrame,
+) -> Tuple[Dict[str, RunningStats], int]:
+    scores = {
+        source: pd.to_numeric(
+            matched[f"{source}_sv"], errors="coerce"
+        ).to_numpy(dtype=np.float64)
+        for source in SOURCE_ORDER
+    }
+    finite_inputs = np.logical_and.reduce(
+        [np.isfinite(scores[source]) for source in SOURCE_ORDER]
+    )
+    excluded = int((~finite_inputs).sum())
+    stats = {source: RunningStats() for source in SOURCE_ORDER}
+    for source in SOURCE_ORDER:
+        stats[source].update(scores[source][finite_inputs])
+    if not stats["bert"].count:
+        raise ValueError("No finite paired BERT/GPT scores were found.")
+    return stats, excluded
 
-        # verification 가능 여부
-        can_verify_this_file = ("truth" in cols) and ("masked_sentence" in cols) and ((year, file_rel) in gpt_verify_maps)
 
-        # 필요한 컬럼만 읽기
-        usecols = [score_col]
-        if can_verify_this_file:
-            usecols += ["truth", "masked_sentence"]
-
-        df_bert = pd.read_csv(bert_path, usecols=usecols)
-        # score NaN drop은 mean 계산용이지만, row_idx 접근은 원래 row order가 필요해서
-        # 여기서는 dropna를 "score만" 기준으로 하되, index가 당겨지면 안됨.
-        # 따라서 dropna는 하지 말고, iloc에서 score NaN이면 해당 row는 count에서 빠지게 처리.
-        n = len(df_bert)
-        if n == 0:
-            miss_rows += len(idxs)
-            continue
-
-        valid = [i for i in idxs if 0 <= i < n]
-        miss_rows += (len(idxs) - len(valid))
-        if not valid:
-            continue
-
-        # ----- mean 계산 -----
-        vals = df_bert[score_col].iloc[valid]
-        # NaN 제외
-        vals = vals.dropna()
-        bert_sum += float(vals.sum())
-        bert_cnt += int(vals.count())
-
-        # ----- verification -----
-        if can_verify_this_file:
-            vmap = gpt_verify_maps[(year, file_rel)]
-            # GPT에 있는 row_idx만 검증 시도
-            check_idxs = [i for i in valid if i in vmap]
-            if check_idxs:
-                verify_attempted += len(check_idxs)
-
-                bert_truth = df_bert["truth"].iloc[check_idxs].astype(str).tolist()
-                bert_mask  = df_bert["masked_sentence"].iloc[check_idxs].astype(str).tolist()
-
-                for i, bt, bm in zip(check_idxs, bert_truth, bert_mask):
-                    gt, gm = vmap[i]
-                    if (bt == gt) and (bm == gm):
-                        verify_matched += 1
-                    else:
-                        verify_mismatch += 1
-                        if len(mismatch_examples) < args.max_mismatch_examples:
-                            mismatch_examples.append({
-                                "year": year,
-                                "file": file_rel,
-                                "row_idx": i,
-                                "gpt_truth": gt,
-                                "bert_truth": bt,
-                                "gpt_masked": gm,
-                                "bert_masked": bm,
-                            })
-
-    bert_mean = (bert_sum / bert_cnt) if bert_cnt > 0 else float("nan")
-
-    print("\n===== RESULTS =====")
-    print(f"[BERT] Score col used : {used_score_col}")
-    print(f"[BERT] Matched rows   : {bert_cnt:,}")
-    print(f"[BERT] Mean SV        : {bert_mean:.6f}")
-
-    print("\n[Sanity]")
-    print(f"Missing BERT files referenced: {miss_files:,}")
-    print(f"Missing rows (OOR/empty/etc.) : {miss_rows:,}")
-
-    print("\n===== VERIFICATION (truth, masked_sentence) =====")
-    if verify_attempted == 0:
-        print("No verification performed (missing truth/masked_sentence in GPT or BERT, or mapping not available).")
+def summary_values(stats: RunningStats) -> Dict[str, float]:
+    if stats.count > 1:
+        variance = stats.m2 / (stats.count - 1)
+        std = math.sqrt(max(variance, 0.0))
+        se = std / math.sqrt(stats.count)
+        ci95_lower = stats.mean - 1.96 * se
+        ci95_upper = stats.mean + 1.96 * se
     else:
-        print(f"Attempted comparisons : {verify_attempted:,}")
-        print(f"Matched exactly       : {verify_matched:,}")
-        print(f"Mismatched            : {verify_mismatch:,}")
-        rate = 100.0 * (verify_matched / verify_attempted)
-        print(f"Exact match rate      : {rate:.2f}%")
+        variance = std = se = ci95_lower = ci95_upper = float("nan")
+    return {
+        "variance": variance,
+        "std": std,
+        "se": se,
+        "ci95_lower": ci95_lower,
+        "ci95_upper": ci95_upper,
+    }
 
-        if mismatch_examples:
-            print("\n--- Mismatch examples (up to N) ---")
-            for ex in mismatch_examples:
-                print(f"\n[year={ex['year']} row_idx={ex['row_idx']}] file={ex['file']}")
-                print(f"  GPT  truth : {ex['gpt_truth']}")
-                print(f"  BERT truth : {ex['bert_truth']}")
-                print(f"  GPT  masked: {ex['gpt_masked'][:200]}{'...' if len(ex['gpt_masked'])>200 else ''}")
-                print(f"  BERT masked: {ex['bert_masked'][:200]}{'...' if len(ex['bert_masked'])>200 else ''}")
 
-    print("\n===== FINAL COMPARISON =====")
-    print(f"GPT  : rows={gpt_cnt:,}, mean sv_llama={gpt_mean:.6f}")
-    print(f"BERT : rows={bert_cnt:,}, mean {used_score_col}={bert_mean:.6f}")
-    if bert_cnt > 0 and gpt_cnt > 0:
-        print(f"Δ(GPT - BERT) = {gpt_mean - bert_mean:.6f}")
+def make_summary_row(
+    *,
+    judge: str,
+    source: str,
+    stats: RunningStats,
+    score_path: str,
+    score_root: str,
+    total_aligned_rows: int,
+    excluded_nonfinite_input_rows: int,
+    years: Optional[Sequence[str]],
+    checkpoint: str,
+    mean_difference: float,
+) -> Dict[str, object]:
+    intervals = summary_values(stats)
+    return {
+        "evaluation": judge,
+        "model": source,
+        "normalization_model": "none",
+        "file_count": 1,
+        "N": stats.count,
+        "mean": stats.mean,
+        "variance": intervals["variance"],
+        "std": intervals["std"],
+        "se": intervals["se"],
+        "ci95_lower": intervals["ci95_lower"],
+        "ci95_upper": intervals["ci95_upper"],
+        "95% CI": (
+            f"[{intervals['ci95_lower']:.6f}, "
+            f"{intervals['ci95_upper']:.6f}]"
+        ),
+        "min": stats.minimum,
+        "max": stats.maximum,
+        "score_column": JUDGE_CONFIGS[judge]["score_col"],
+        "normalization": "raw_sv",
+        "total_aligned_rows": total_aligned_rows,
+        "excluded_nonfinite_input_rows": excluded_nonfinite_input_rows,
+        "excluded_zero_or_small_denominator_rows": 0,
+        "excluded_nonfinite_ratio_rows": 0,
+        "min_abs_denominator": 0.0,
+        "identity_columns": "|".join(IDENTITY_COLS),
+        "distribution_plot": "",
+        "evaluation_set": "paired_bert_gpt_sampling_rows",
+        "selected_months": "",
+        "selected_years": "|".join(years or []),
+        "score_data_dir": os.path.dirname(os.path.abspath(score_path)),
+        "score_data_root": os.path.abspath(score_root),
+        "input_file": os.path.abspath(score_path),
+        "judge_file_tag": JUDGE_CONFIGS[judge]["file_tag"],
+        "judge_checkpoint": checkpoint,
+        "paired_mean_difference_gpt_minus_bert": mean_difference,
+    }
+
+
+def print_summary(row: Dict[str, object]) -> None:
+    print(f"\n===== [{row['evaluation']} / {row['model']}] RAW SV =====")
+    print(f"Matched valid rows    : {row['N']:,}")
+    print(f"Mean raw score        : {row['mean']:.6f}")
+    print(f"Variance              : {row['variance']:.6f}")
+    print(f"Standard deviation    : {row['std']:.6f}")
+    print(f"Standard error        : {row['se']:.6f}")
+    print(f"95% CI                : {row['95% CI']}")
+    print(f"Full minimum          : {row['min']:.6f}")
+    print(f"Full maximum          : {row['max']:.6f}")
+
+
+def save_summary(rows: List[Dict[str, object]], output_csv: str) -> None:
+    output_path = os.path.abspath(output_csv)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    temporary = f"{output_path}.tmp.{os.getpid()}"
+    try:
+        pd.DataFrame(rows).to_csv(temporary, index=False)
+        os.replace(temporary, output_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compute paired raw-SV summaries for BERT and GPT predictions "
+            "under LLaMA, Gemma, Qwen, and BERT judges."
+        )
+    )
+    parser.add_argument(
+        "--judges",
+        nargs="+",
+        choices=JUDGE_ORDER,
+        default=list(JUDGE_ORDER),
+        help="Judges to summarize (default: llama gemma qwen bert).",
+    )
+    parser.add_argument("--sample-root", default=DEFAULT_SAMPLE_ROOT)
+    parser.add_argument(
+        "--other-models-root", default=DEFAULT_OTHER_MODELS_ROOT
+    )
+    parser.add_argument(
+        "--years",
+        nargs="*",
+        default=None,
+        help="Optional year filter, for example: --years 2018 2019",
+    )
+    parser.add_argument("--output-csv", default=DEFAULT_OUTPUT_CSV)
+
+    for judge in JUDGE_ORDER:
+        for source in SOURCE_ORDER:
+            parser.add_argument(
+                f"--{judge}-{source}-file",
+                dest=f"{judge}_{source}_file",
+                default=None,
+                help=f"Override the {judge} judge / {source} score file.",
+            )
+
+    args = parser.parse_args()
+    if len(set(args.judges)) != len(args.judges):
+        parser.error("--judges must not contain duplicates")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    print(f"Selected judges : {', '.join(args.judges)}")
+    print("Models          : bert, gpt")
+    print("Normalization   : none (raw SV)")
+    print(f"Identity columns: {IDENTITY_COLS}")
+    print("Finite filter   : keep a row only when both BERT and GPT are finite")
+
+    all_rows: List[Dict[str, object]] = []
+    for judge in args.judges:
+        paths = resolve_score_paths(args, judge)
+        score_root = (
+            args.sample_root if judge == "bert" else args.other_models_root
+        )
+        print(f"\n================ [{judge}] ================")
+        print(f"BERT score file: {paths['bert']}")
+        print(f"GPT score file : {paths['gpt']}")
+        print(f"SV column      : {JUDGE_CONFIGS[judge]['score_col']}")
+
+        frames: Dict[str, pd.DataFrame] = {}
+        checkpoints: Dict[str, str] = {}
+        for source in SOURCE_ORDER:
+            frames[source], checkpoints[source] = load_score_frame(
+                path=paths[source],
+                source=source,
+                judge=judge,
+                years=args.years,
+            )
+        nonempty_checkpoints = {
+            value for value in checkpoints.values() if value
+        }
+        if len(nonempty_checkpoints) > 1:
+            raise ValueError(
+                f"[{judge}] judge checkpoint mismatch: {checkpoints}"
+            )
+        checkpoint = next(iter(nonempty_checkpoints), "")
+
+        matched = match_sources(judge=judge, frames=frames)
+        stats, excluded = compute_paired_stats(matched)
+        mean_difference = stats["gpt"].mean - stats["bert"].mean
+        rows = [
+            make_summary_row(
+                judge=judge,
+                source=source,
+                stats=stats[source],
+                score_path=paths[source],
+                score_root=score_root,
+                total_aligned_rows=len(matched),
+                excluded_nonfinite_input_rows=excluded,
+                years=args.years,
+                checkpoint=checkpoint,
+                mean_difference=mean_difference,
+            )
+            for source in SOURCE_ORDER
+        ]
+        for row in rows:
+            print_summary(row)
+
+        print(f"\n===== [{judge}] PAIRED COMPARISON =====")
+        print(f"Total aligned rows             : {len(matched):,}")
+        print(f"Excluded non-finite input rows: {excluded:,}")
+        print(f"Paired valid rows              : {stats['bert'].count:,}")
+        print(f"BERT mean                      : {stats['bert'].mean:.6f}")
+        print(f"GPT mean                       : {stats['gpt'].mean:.6f}")
+        print(f"Delta (GPT - BERT)             : {mean_difference:.6f}")
+        all_rows.extend(rows)
+
+    save_summary(all_rows, args.output_csv)
+    print(f"\nSaved paired raw summary: {os.path.abspath(args.output_csv)}")
 
 
 if __name__ == "__main__":

@@ -136,22 +136,26 @@ def plot_binary_union_heatmap(
     row_labels,
     out_png,
     title,
+    font_size=16,
+    figure_width=18.0,
+    figure_height=3.2,
+    dpi=300,
 ):
     rgb_img = binary_to_rgb(bin_mat, row_labels)
 
-    fig = plt.figure(figsize=(18, 3.2))
+    fig = plt.figure(figsize=(figure_width, figure_height))
     ax = fig.add_subplot(1, 1, 1)
 
     ax.imshow(rgb_img, aspect="auto")
 
     ax.set_yticks(range(len(row_labels)))
-    ax.set_yticklabels(row_labels, fontsize=15)
+    ax.set_yticklabels(row_labels, fontsize=font_size - 1)
     ax.set_xticks([])
     ax.set_ylabel("")
-    ax.set_title(title, fontsize=26, pad=10)
+    ax.set_title(title, fontsize=font_size + 10, pad=10)
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.savefig(out_png, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -173,12 +177,17 @@ def main():
 
     ap.add_argument("--remove-all-common", action="store_true")
     ap.add_argument("--candidate-mult", type=int, default=10)
+    ap.add_argument("--max-rounds", type=int, default=10000)
 
     ap.add_argument("--col-order", default="id", choices=["id", "dominant", "cluster"])
     ap.add_argument("--n-clusters", type=int, default=12)
 
     # NEW
     ap.add_argument("--quantile", type=float, default=0.95)
+    ap.add_argument("--font-size", type=int, default=16)
+    ap.add_argument("--figure-width", type=float, default=18.0)
+    ap.add_argument("--figure-height", type=float, default=3.2)
+    ap.add_argument("--dpi", type=int, default=300)
 
     args = ap.parse_args()
     ensure_dir(args.out_dir)
@@ -219,7 +228,7 @@ def main():
 
         if args.remove_all_common:
             selected, removed, rounds = iterative_common_removed_topk(
-                ranked_by_ind, args.topk
+                ranked_by_ind, args.topk, max_rounds=args.max_rounds
             )
             print(f"[L{layer:02d}] removed common = {len(removed)}")
             top_by_ind = selected
@@ -231,7 +240,12 @@ def main():
 
         mat = np.vstack([mu_by_ind[ind][union_ids] for ind in SHORT_ORDER])
 
-        if args.col_order == "cluster":
+        if args.col_order == "dominant":
+            dominant = np.nanargmax(mat, axis=0)
+            order = np.lexsort((union_ids, dominant))
+            mat = mat[:, order]
+            union_ids = union_ids[order]
+        elif args.col_order == "cluster":
             mat, union_ids, _ = reorder_columns_by_feature_clustering(
                 mat, union_ids, args.n_clusters
             )
@@ -249,7 +263,11 @@ def main():
             bin_mat,
             SHORT_ORDER,
             out_png,
-            title=f"Layer {layer:02d}"
+            title=f"Layer {layer:02d}",
+            font_size=args.font_size,
+            figure_width=args.figure_width,
+            figure_height=args.figure_height,
+            dpi=args.dpi,
         )
 
     print("[DONE]")

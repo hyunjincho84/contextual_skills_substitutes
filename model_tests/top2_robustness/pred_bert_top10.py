@@ -46,16 +46,16 @@ def extract_year_month(path: str):
     yyyy, mm = m.groups()
     return (yyyy, int(mm))
 
-def month_dir_path(year: str):
-    d = os.path.join(OUT_DIR, "pred", year)
+def month_dir_path(output_dir: str, year: str):
+    d = os.path.join(output_dir, "pred", year)
     os.makedirs(d, exist_ok=True)
     return d
 
-def output_path_for(year: str, month: int):
-    return os.path.join(month_dir_path(year), f"sv_summary_llama_full_bert_top10_{year}-{month:02d}.csv.gz")
+def output_path_for(output_dir: str, year: str, month: int):
+    return os.path.join(month_dir_path(output_dir, year), f"sv_summary_llama_full_bert_top10_{year}-{month:02d}.csv.gz")
 
-def write_preds_month(year: str, month: int, rows: list):
-    out_path = output_path_for(year, month)
+def write_preds_month(output_dir: str, year: str, month: int, rows: list):
+    out_path = output_path_for(output_dir, year, month)
     df = pd.DataFrame(rows)
     df.to_csv(out_path, mode="w", header=True, index=False, compression="gzip")
     return out_path
@@ -90,8 +90,9 @@ class MaskedSkillDataset(Dataset):
         return self.samples[idx]
 
 class BertTop10Collator:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, max_len: int):
         self.tokenizer = tokenizer
+        self.max_len = max_len
 
     def __call__(self, batch):
         if not batch:
@@ -99,7 +100,7 @@ class BertTop10Collator:
         sentences, labels, rows = zip(*batch)
         enc = self.tokenizer(
             list(sentences), padding=True, truncation=True,
-            max_length=MAX_LEN, return_tensors="pt"
+            max_length=self.max_len, return_tensors="pt"
         )
         input_ids = enc["input_ids"]
         attn_mask = enc["attention_mask"]
@@ -139,15 +140,15 @@ def stats_add(dst, src):
     return dst
 
 # ─── Evaluate ─────────────────────────────────────────────
-def load_worker_state(device: str, worker_label: str):
-    tokenizer = BertTokenizerFast.from_pretrained(MODEL_NAME)
-    with open(VOCAB_PATH, "r", encoding="utf-8") as f:
+def load_worker_state(args, device: str, worker_label: str):
+    tokenizer = BertTokenizerFast.from_pretrained(args.model_name)
+    with open(args.vocab_path, "r", encoding="utf-8") as f:
         skill2idx = json.load(f)
     num_skills = len(skill2idx)
     idx2skill = {int(v): k for k, v in skill2idx.items()}
 
-    model = BERTForSkillPrediction(MODEL_NAME, num_skills=num_skills).to(device)
-    state = torch.load(BEST_MODEL_PT, map_location=device)
+    model = BERTForSkillPrediction(args.model_name, num_skills=num_skills).to(device)
+    state = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state, strict=True)
     model.eval()
     print(f"[{worker_label}] model loaded on {device}")
@@ -158,7 +159,7 @@ def process_one_file(fp, args, tokenizer, skill2idx, idx2skill, model, device: s
     if month is None:
         return stats_zero()
 
-    out_path = output_path_for(year, month)
+    out_path = output_path_for(args.output_dir, year, month)
     if args.resume and os.path.exists(out_path):
         print(f"[{worker_label}][SKIP][resume] already exists: {out_path}")
         out = stats_zero()
@@ -173,7 +174,7 @@ def process_one_file(fp, args, tokenizer, skill2idx, idx2skill, model, device: s
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=BertTop10Collator(tokenizer),
+        collate_fn=BertTop10Collator(tokenizer, args.max_len),
         num_workers=args.num_workers,
         pin_memory=device.startswith("cuda"),
         persistent_workers=False,
@@ -229,7 +230,7 @@ def process_one_file(fp, args, tokenizer, skill2idx, idx2skill, model, device: s
                 })
 
     if pred_buffer:
-        write_preds_month(year, month, pred_buffer)
+        write_preds_month(args.output_dir, year, month, pred_buffer)
         out["files"] = 1
         print(f"[{worker_label}][{year}-{month:02d}] saved {len(pred_buffer):,} rows -> {out_path}")
     return out
@@ -240,7 +241,7 @@ def process_files(file_items, args, gpu_id: str, worker_idx: int):
     if device.startswith("cuda"):
         torch.cuda.set_device(device)
 
-    tokenizer, skill2idx, idx2skill, model = load_worker_state(device, worker_label)
+    tokenizer, skill2idx, idx2skill, model = load_worker_state(args, device, worker_label)
     out = stats_zero()
     for fp in tqdm(file_items, desc=f"[{worker_label}] BERT top10", unit="file", position=worker_idx):
         stats_add(out, process_one_file(fp, args, tokenizer, skill2idx, idx2skill, model, device, worker_label))
@@ -313,8 +314,8 @@ def evaluate(args):
     )
 
     print(result_text)
-    os.makedirs(OUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUT_DIR, "test_results.txt")
+    os.makedirs(args.output_dir, exist_ok=True)
+    out_path = os.path.join(args.output_dir, "test_results.txt")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(result_text)
 
@@ -322,6 +323,11 @@ def evaluate(args):
 
 def parse_args():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model-name", default=MODEL_NAME)
+    ap.add_argument("--vocab-path", default=VOCAB_PATH)
+    ap.add_argument("--checkpoint", default=BEST_MODEL_PT)
+    ap.add_argument("--output-dir", default=OUT_DIR)
+    ap.add_argument("--max-len", type=int, default=MAX_LEN)
     ap.add_argument("--input-glob", default=INPUT_GLOB)
     ap.add_argument("--gpus", default=os.environ.get("BERT_GPUS", os.environ.get("GPU_IDS", "auto")))
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE)

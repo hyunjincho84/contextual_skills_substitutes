@@ -26,6 +26,7 @@ def main():
     ap.add_argument("--iqr-alpha", type=float, default=0.18, help="alpha for IQR band")
     ap.add_argument("--min-diff-count", type=int, default=1,
                     help="require at least this many pairs for a given Δyear bucket")
+    ap.add_argument("--dpi", type=int, default=300)
     args = ap.parse_args()
 
     layers = [int(x.strip()) for x in args.layers.split(",") if x.strip()]
@@ -133,7 +134,7 @@ def main():
     ax.legend(frameon=True)
 
     plt.tight_layout()
-    plt.savefig(args.out_png, dpi=300, bbox_inches="tight")
+    plt.savefig(args.out_png, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
 
     print("[DONE]", args.out_png)
